@@ -1,0 +1,7 @@
+node_modules
+dist
+.aws-sam
+*.js.map
+*.d.ts
+.dynamodb/
+*.db

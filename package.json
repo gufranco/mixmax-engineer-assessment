@@ -1,0 +1,29 @@
+{
+  "name": "feature-usage-lambdas",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "jest --testPathPattern=tests/unit --testPathIgnorePatterns=internal",
+    "test:e2e": "jest --config jest.config.e2e.dynamodb.js --testPathIgnorePatterns=internal --testTimeout=30000",
+    "build": "sam build",
+    "lint": "eslint 'src/**/*.ts'"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.600.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/aws-lambda": "^8.10.140",
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.14.0",
+    "@typescript-eslint/eslint-plugin": "^8.55.0",
+    "@typescript-eslint/parser": "^8.55.0",
+    "esbuild": "^0.21.0",
+    "eslint": "^9.39.2",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.4",
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^8.55.0",
+    "@shelf/jest-dynamodb": "^3.4.1"
+  }
+}

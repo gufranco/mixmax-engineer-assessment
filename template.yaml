@@ -1,0 +1,78 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Feature Usage Lambda Functions
+
+Globals:
+  Function:
+    Runtime: nodejs18.x
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        ENV: local
+
+Resources:
+  MetricQueryHandler:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/metric-query-handler.main
+      CodeUri: .
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsageTable
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - src/metric-query-handler.ts
+
+  MetricUpdatesConsumer:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/metric-updates-consumer.main
+      CodeUri: .
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt UsageQueue.Arn
+            BatchSize: 10
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsageTable
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - src/metric-updates-consumer.ts
+
+  UsageTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: feature-usage-local
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  UsageQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: feature-usage-updates
+      VisibilityTimeout: 60
