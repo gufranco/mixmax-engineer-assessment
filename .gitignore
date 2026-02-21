@@ -1,7 +1,11 @@
-node_modules
-dist
 .aws-sam
-*.js.map
-*.d.ts
 .dynamodb/
+.env
+*.d.ts
 *.db
+*.js.map
+CHANGES.md
+coverage/
+dist/
+localstack-data/
+node_modules/

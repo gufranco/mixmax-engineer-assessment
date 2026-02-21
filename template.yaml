@@ -2,60 +2,144 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: Feature Usage Lambda Functions
 
+Parameters:
+  Env:
+    Type: String
+    Default: local
+    AllowedValues:
+      - local
+      - staging
+      - production
+  TtlDays:
+    Type: Number
+    Default: 90
+    Description: Number of days before DynamoDB items expire via TTL
+  MaxDateRangeDays:
+    Type: Number
+    Default: 1825
+    Description: Maximum allowed date range in days for metric queries
+  LambdaTimeout:
+    Type: Number
+    Default: 30
+    Description: Lambda function timeout in seconds
+  LambdaMemorySize:
+    Type: Number
+    Default: 256
+    Description: Lambda function memory size in MB
+  ReservedConcurrency:
+    Type: Number
+    Default: 10
+    Description: Reserved concurrent executions for the updates handler
+  SqsBatchSize:
+    Type: Number
+    Default: 10
+    Description: Number of SQS messages per Lambda invocation
+  SqsVisibilityTimeout:
+    Type: Number
+    Default: 60
+    Description: SQS visibility timeout in seconds
+  MaxReceiveCount:
+    Type: Number
+    Default: 3
+    Description: Max delivery attempts before routing to DLQ
+  DlqRetentionPeriod:
+    Type: Number
+    Default: 1209600
+    Description: DLQ message retention in seconds (default 14 days)
+  ErrorAlarmThreshold:
+    Type: Number
+    Default: 5
+    Description: Number of Lambda errors to trigger the alarm
+  ErrorAlarmPeriod:
+    Type: Number
+    Default: 60
+    Description: CloudWatch metric evaluation period in seconds for the error alarm
+  ErrorAlarmEvaluationPeriods:
+    Type: Number
+    Default: 3
+    Description: Number of consecutive periods before the error alarm fires
+  QueryReservedConcurrency:
+    Type: Number
+    Default: 10
+    Description: Reserved concurrent executions for the query handler
+  LogLevel:
+    Type: String
+    Default: info
+    AllowedValues:
+      - debug
+      - info
+      - warn
+      - error
+    Description: Minimum log level for Lambda functions
+
 Globals:
   Function:
-    Runtime: nodejs18.x
-    Timeout: 30
-    MemorySize: 256
+    Runtime: nodejs22.x
+    Timeout: !Ref LambdaTimeout
+    MemorySize: !Ref LambdaMemorySize
+    Tracing: Active
     Environment:
       Variables:
-        ENV: local
+        ENV: !Ref Env
+        TTL_DAYS: !Ref TtlDays
+        MAX_DATE_RANGE_DAYS: !Ref MaxDateRangeDays
+        LOG_LEVEL: !Ref LogLevel
 
 Resources:
   MetricQueryHandler:
     Type: AWS::Serverless::Function
     Properties:
-      Handler: src/metric-query-handler.main
+      Handler: src/metric-query.handler.main
       CodeUri: .
+      ReservedConcurrentExecutions: !Ref QueryReservedConcurrency
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref UsageTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Query
+              Resource: !GetAtt UsageTable.Arn
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
         Minify: false
-        Target: es2020
+        Target: es2022
         Sourcemap: true
         EntryPoints:
-          - src/metric-query-handler.ts
+          - src/metric-query.handler.ts
 
-  MetricUpdatesConsumer:
+  MetricUpdatesHandler:
     Type: AWS::Serverless::Function
     Properties:
-      Handler: src/metric-updates-consumer.main
+      Handler: src/metric-updates.handler.main
       CodeUri: .
+      ReservedConcurrentExecutions: !Ref ReservedConcurrency
       Events:
         SQSEvent:
           Type: SQS
           Properties:
             Queue: !GetAtt UsageQueue.Arn
-            BatchSize: 10
+            BatchSize: !Ref SqsBatchSize
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref UsageTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+              Resource: !GetAtt UsageTable.Arn
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
         Minify: false
-        Target: es2020
+        Target: es2022
         Sourcemap: true
         EntryPoints:
-          - src/metric-updates-consumer.ts
+          - src/metric-updates.handler.ts
 
   UsageTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: feature-usage-local
+      TableName: !Sub feature-usage-${Env}
       AttributeDefinitions:
         - AttributeName: pk
           AttributeType: S
@@ -74,5 +158,79 @@ Resources:
   UsageQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: feature-usage-updates
-      VisibilityTimeout: 60
+      QueueName: !Sub feature-usage-updates-${Env}
+      VisibilityTimeout: !Ref SqsVisibilityTimeout
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt UsageDeadLetterQueue.Arn
+        maxReceiveCount: !Ref MaxReceiveCount
+
+  UsageDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub feature-usage-updates-dlq-${Env}
+      MessageRetentionPeriod: !Ref DlqRetentionPeriod
+
+  AlarmNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub feature-usage-alarms-${Env}
+
+  DLQDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Messages arriving in the dead letter queue
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt UsageDeadLetterQueue.QueueName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
+
+  UpdatesHandlerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Updates handler error rate exceeded threshold
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MetricUpdatesHandler
+      Statistic: Sum
+      Period: !Ref ErrorAlarmPeriod
+      EvaluationPeriods: !Ref ErrorAlarmEvaluationPeriods
+      Threshold: !Ref ErrorAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
+
+  QueryHandlerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Query handler error rate exceeded threshold
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MetricQueryHandler
+      Statistic: Sum
+      Period: !Ref ErrorAlarmPeriod
+      EvaluationPeriods: !Ref ErrorAlarmEvaluationPeriods
+      Threshold: !Ref ErrorAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic

@@ -1,0 +1,4 @@
+pnpm lint
+pnpm format:check
+npx tsc --noEmit
+pnpm test
