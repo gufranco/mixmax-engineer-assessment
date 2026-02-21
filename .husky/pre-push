@@ -1,4 +1,4 @@
 pnpm lint
 pnpm format:check
-npx tsc --noEmit
+pnpm typecheck
 pnpm test

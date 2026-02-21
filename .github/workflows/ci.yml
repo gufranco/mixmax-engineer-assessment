@@ -21,7 +21,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
-      - run: npx tsc --noEmit
+      - run: pnpm typecheck
 
   unit-tests:
     runs-on: ubuntu-latest
@@ -44,7 +44,7 @@ jobs:
           - 4566:4566
         env:
           DEBUG: '0'
-          SERVICES: dynamodb,sqs
+          SERVICES: dynamodb
         options: >-
           --health-cmd "curl -f http://localhost:4566/_localstack/health"
           --health-interval 5s
@@ -78,15 +78,6 @@ jobs:
           aws dynamodb update-time-to-live \
             --table-name feature-usage-local \
             --time-to-live-specification "Enabled=true,AttributeName=ttl"
-
-          aws sqs create-queue --queue-name feature-usage-updates-dlq-local
-
-          aws sqs create-queue \
-            --queue-name feature-usage-updates-local \
-            --attributes '{
-              "VisibilityTimeout": "60",
-              "RedrivePolicy": "{\"deadLetterTargetArn\":\"arn:aws:sqs:us-east-1:000000000000:feature-usage-updates-dlq-local\",\"maxReceiveCount\":\"3\"}"
-            }'
       - name: Run integration tests
         env:
           AWS_ENDPOINT_URL: http://localhost:4566

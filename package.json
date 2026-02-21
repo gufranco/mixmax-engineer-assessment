@@ -11,6 +11,7 @@
     "test:integration": "jest --config jest.config.integration.js",
     "test:all": "pnpm test && pnpm test:integration",
     "test:coverage": "jest --config jest.config.coverage.js --coverage",
+    "typecheck": "tsc --noEmit",
     "build": "sam build",
     "lint": "eslint 'src/**/*.ts' 'tests/**/*.ts'",
     "lint:fix": "eslint --fix 'src/**/*.ts' 'tests/**/*.ts'",
@@ -33,7 +34,6 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@aws-sdk/client-sqs": "^3.995.0",
     "@eslint/js": "^10.0.1",
     "@faker-js/faker": "^8.4.1",
     "@tsconfig/node22": "^22.0.5",
