@@ -101,7 +101,7 @@ Resources:
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
-        Minify: false
+        Minify: true
         Target: es2022
         Sourcemap: true
         EntryPoints:
@@ -130,7 +130,7 @@ Resources:
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
-        Minify: false
+        Minify: true
         Target: es2022
         Sourcemap: true
         EntryPoints:
@@ -138,6 +138,8 @@ Resources:
 
   UsageTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       TableName: !Sub feature-usage-${Env}
       AttributeDefinitions:
@@ -151,6 +153,8 @@ Resources:
         - AttributeName: sk
           KeyType: RANGE
       BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       TimeToLiveSpecification:
         AttributeName: ttl
         Enabled: true
@@ -159,6 +163,7 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub feature-usage-updates-${Env}
+      SqsManagedSseEnabled: true
       VisibilityTimeout: !Ref SqsVisibilityTimeout
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt UsageDeadLetterQueue.Arn
@@ -168,6 +173,7 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub feature-usage-updates-dlq-${Env}
+      SqsManagedSseEnabled: true
       MessageRetentionPeriod: !Ref DlqRetentionPeriod
 
   AlarmNotificationTopic:
@@ -234,3 +240,15 @@ Resources:
         - !Ref AlarmNotificationTopic
       OKActions:
         - !Ref AlarmNotificationTopic
+
+Outputs:
+  QueryHandlerArn:
+    Value: !GetAtt MetricQueryHandler.Arn
+  UpdatesHandlerArn:
+    Value: !GetAtt MetricUpdatesHandler.Arn
+  QueueUrl:
+    Value: !Ref UsageQueue
+  DeadLetterQueueUrl:
+    Value: !Ref UsageDeadLetterQueue
+  TableName:
+    Value: !Ref UsageTable
