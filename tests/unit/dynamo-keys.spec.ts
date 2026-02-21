@@ -1,6 +1,7 @@
 import { faker } from '@faker-js/faker';
 
 import { buildPartitionKey } from '../../src/infrastructure/partition-key.builder';
+import { isFullDayRange } from '../../src/infrastructure/query-granularity.util';
 import { buildSortKey } from '../../src/infrastructure/sort-key.builder';
 
 function fakeDateHour(): string {
@@ -57,5 +58,52 @@ describe('buildSortKey', () => {
 
     // Assert
     expect(result).toBe(`D#${date.substring(0, 10)}`);
+  });
+});
+
+describe('isFullDayRange', () => {
+  it('should return true when fromDate starts at T00 and toDate ends at T23', () => {
+    // Arrange
+    const fromDate = '2024-06-15T00';
+    const toDate = '2024-06-20T23';
+
+    // Act & Assert
+    expect(isFullDayRange(fromDate, toDate)).toBe(true);
+  });
+
+  it('should return false when fromDate does not start at T00', () => {
+    // Arrange
+    const fromDate = '2024-06-15T08';
+    const toDate = '2024-06-20T23';
+
+    // Act & Assert
+    expect(isFullDayRange(fromDate, toDate)).toBe(false);
+  });
+
+  it('should return false when toDate does not end at T23', () => {
+    // Arrange
+    const fromDate = '2024-06-15T00';
+    const toDate = '2024-06-20T18';
+
+    // Act & Assert
+    expect(isFullDayRange(fromDate, toDate)).toBe(false);
+  });
+
+  it('should return false when both boundaries are partial', () => {
+    // Arrange
+    const fromDate = '2024-06-15T14';
+    const toDate = '2024-06-20T18';
+
+    // Act & Assert
+    expect(isFullDayRange(fromDate, toDate)).toBe(false);
+  });
+
+  it('should return true for a single full day', () => {
+    // Arrange
+    const fromDate = '2024-06-15T00';
+    const toDate = '2024-06-15T23';
+
+    // Act & Assert
+    expect(isFullDayRange(fromDate, toDate)).toBe(true);
   });
 });

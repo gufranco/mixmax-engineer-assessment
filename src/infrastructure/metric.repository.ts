@@ -5,6 +5,7 @@ import type { MetricRepository } from '../types/metric-repository.interface';
 import type { MetricUpdateMessage } from '../types/metric-update-message.type';
 import { buildPartitionKey } from './partition-key.builder';
 import { buildSortKey } from './sort-key.builder';
+import { isFullDayRange } from './query-granularity.util';
 import { calculateTtl } from './calculate-ttl.util';
 import { dynamoClient } from './dynamo.client';
 import { getTableName } from '../config/table-name.config';
@@ -77,8 +78,9 @@ class DynamoMetricRepository implements MetricRepository {
       ? buildPartitionKey('user', query.userId, query.metricId)
       : buildPartitionKey('workspace', query.workspaceId, query.metricId);
 
-    const fromSk = buildSortKey('hourly', query.fromDate);
-    const toSk = buildSortKey('hourly', query.toDate);
+    const granularity = isFullDayRange(query.fromDate, query.toDate) ? 'daily' : 'hourly';
+    const fromSk = buildSortKey(granularity, query.fromDate);
+    const toSk = buildSortKey(granularity, query.toDate);
 
     let totalCount = 0;
     let exclusiveStartKey: Record<string, { S: string }> | undefined;
@@ -88,6 +90,8 @@ class DynamoMetricRepository implements MetricRepository {
         new QueryCommand({
           TableName: tableName,
           KeyConditionExpression: 'pk = :pk AND sk BETWEEN :fromDate AND :toDate',
+          ProjectionExpression: '#count',
+          ExpressionAttributeNames: { '#count': 'count' },
           ExpressionAttributeValues: {
             ':pk': { S: pk },
             ':fromDate': { S: fromSk },
