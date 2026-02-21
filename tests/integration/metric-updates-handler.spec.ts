@@ -1,9 +1,9 @@
 import { faker } from '@faker-js/faker';
 
-import { buildBody } from './build-body';
-import { clearTable } from './clear-table';
-import { getItem } from './get-item';
-import { sendToSqs, receiveFromSqs, deleteFromSqs, purgeQueue } from './sqs-helpers';
+import { buildBody } from './helpers/build-body';
+import { buildSqsEvent } from './helpers/build-sqs-event';
+import { clearTable } from './helpers/clear-table';
+import { getItem } from './helpers/get-item';
 import { main as handler } from '../../src/metric-updates.handler';
 
 function fakeDateHour(): string {
@@ -15,7 +15,6 @@ function fakeDateHour(): string {
 
 beforeEach(async () => {
   await clearTable();
-  await purgeQueue();
 });
 
 describe('metric-updates-handler', () => {
@@ -27,9 +26,7 @@ describe('metric-updates-handler', () => {
       const date = fakeDateHour();
       const count = faker.number.int({ min: 1, max: 100 });
 
-      await sendToSqs(buildBody({ workspaceId, metricId, date, count }));
-
-      const event = await receiveFromSqs(1);
+      const event = buildSqsEvent(buildBody({ workspaceId, metricId, date, count }));
 
       // Act
       const result = await handler(event);
@@ -47,10 +44,6 @@ describe('metric-updates-handler', () => {
       );
 
       expect(daily.Item?.['count']?.N).toBe(String(count));
-
-      for (const record of event.Records) {
-        await deleteFromSqs(record.receiptHandle);
-      }
     });
 
     it('should write all 4 entries when userId is provided', async () => {
@@ -61,9 +54,7 @@ describe('metric-updates-handler', () => {
       const date = fakeDateHour();
       const count = faker.number.int({ min: 1, max: 100 });
 
-      await sendToSqs(buildBody({ workspaceId, userId, metricId, date, count }));
-
-      const event = await receiveFromSqs(1);
+      const event = buildSqsEvent(buildBody({ workspaceId, userId, metricId, date, count }));
 
       // Act
       const result = await handler(event);
@@ -89,10 +80,6 @@ describe('metric-updates-handler', () => {
       const usrDaily = await getItem(`USR#${userId}#MET#${metricId}`, `D#${date.substring(0, 10)}`);
 
       expect(usrDaily.Item?.['count']?.N).toBe(String(count));
-
-      for (const record of event.Records) {
-        await deleteFromSqs(record.receiptHandle);
-      }
     });
 
     it('should accumulate count when writing the same metric twice', async () => {
@@ -103,31 +90,15 @@ describe('metric-updates-handler', () => {
       const count1 = faker.number.int({ min: 1, max: 100 });
       const count2 = faker.number.int({ min: 1, max: 100 });
 
-      await sendToSqs(buildBody({ workspaceId, metricId, date, count: count1 }));
-
-      const event1 = await receiveFromSqs(1);
-
-      await handler(event1);
-
-      for (const record of event1.Records) {
-        await deleteFromSqs(record.receiptHandle);
-      }
-
-      await sendToSqs(buildBody({ workspaceId, metricId, date, count: count2 }));
-
-      const event2 = await receiveFromSqs(1);
+      await handler(buildSqsEvent(buildBody({ workspaceId, metricId, date, count: count1 })));
 
       // Act
-      await handler(event2);
+      await handler(buildSqsEvent(buildBody({ workspaceId, metricId, date, count: count2 })));
 
       // Assert
       const hourly = await getItem(`WSP#${workspaceId}#MET#${metricId}`, `H#${date}`);
 
       expect(hourly.Item?.['count']?.N).toBe(String(count1 + count2));
-
-      for (const record of event2.Records) {
-        await deleteFromSqs(record.receiptHandle);
-      }
     });
 
     it('should set TTL attribute roughly 90 days in the future', async () => {
@@ -136,9 +107,7 @@ describe('metric-updates-handler', () => {
       const metricId = faker.string.alphanumeric(10);
       const date = fakeDateHour();
 
-      await sendToSqs(buildBody({ workspaceId, metricId, date }));
-
-      const event = await receiveFromSqs(1);
+      const event = buildSqsEvent(buildBody({ workspaceId, metricId, date }));
 
       // Act
       await handler(event);
@@ -151,10 +120,6 @@ describe('metric-updates-handler', () => {
 
       expect(ttl).toBeGreaterThan(now + ninetyDays - 60);
       expect(ttl).toBeLessThan(now + ninetyDays + 60);
-
-      for (const record of event.Records) {
-        await deleteFromSqs(record.receiptHandle);
-      }
     });
 
     it('should process batch of multiple records correctly', async () => {
@@ -169,11 +134,11 @@ describe('metric-updates-handler', () => {
       const count2 = faker.number.int({ min: 1, max: 100 });
       const count3 = faker.number.int({ min: 1, max: 100 });
 
-      await sendToSqs(buildBody({ workspaceId: ws1, metricId: metric1, count: count1, date }));
-      await sendToSqs(buildBody({ workspaceId: ws1, metricId: metric2, count: count2, date }));
-      await sendToSqs(buildBody({ workspaceId: ws2, metricId: metric3, count: count3, date }));
-
-      const event = await receiveFromSqs(3);
+      const event = buildSqsEvent(
+        buildBody({ workspaceId: ws1, metricId: metric1, count: count1, date }),
+        buildBody({ workspaceId: ws1, metricId: metric2, count: count2, date }),
+        buildBody({ workspaceId: ws2, metricId: metric3, count: count3, date }),
+      );
 
       // Act
       const result = await handler(event);
@@ -192,10 +157,6 @@ describe('metric-updates-handler', () => {
       const third = await getItem(`WSP#${ws2}#MET#${metric3}`, `H#${date}`);
 
       expect(third.Item?.['count']?.N).toBe(String(count3));
-
-      for (const record of event.Records) {
-        await deleteFromSqs(record.receiptHandle);
-      }
     });
 
     it('should handle large count values', async () => {
@@ -205,9 +166,7 @@ describe('metric-updates-handler', () => {
       const date = fakeDateHour();
       const largeCount = faker.number.int({ min: 100000, max: 999999 });
 
-      await sendToSqs(buildBody({ workspaceId, metricId, date, count: largeCount }));
-
-      const event = await receiveFromSqs(1);
+      const event = buildSqsEvent(buildBody({ workspaceId, metricId, date, count: largeCount }));
 
       // Act
       await handler(event);
@@ -216,19 +175,13 @@ describe('metric-updates-handler', () => {
       const hourly = await getItem(`WSP#${workspaceId}#MET#${metricId}`, `H#${date}`);
 
       expect(hourly.Item?.['count']?.N).toBe(String(largeCount));
-
-      for (const record of event.Records) {
-        await deleteFromSqs(record.receiptHandle);
-      }
     });
   });
 
   describe('error handling', () => {
     it('should return batchItemFailures for malformed JSON', async () => {
       // Arrange
-      await sendToSqs('not-json{{{');
-
-      const event = await receiveFromSqs(1);
+      const event = buildSqsEvent('not-json{{{');
 
       // Act
       const result = await handler(event);
@@ -236,10 +189,6 @@ describe('metric-updates-handler', () => {
       // Assert
       expect(result.batchItemFailures).toHaveLength(1);
       expect(result.batchItemFailures[0]?.itemIdentifier).toBe(event.Records[0]?.messageId);
-
-      for (const record of event.Records) {
-        await deleteFromSqs(record.receiptHandle);
-      }
     });
 
     it('should return batchItemFailures for missing required field', async () => {
@@ -247,9 +196,7 @@ describe('metric-updates-handler', () => {
       const metricId = faker.string.alphanumeric(10);
       const count = faker.number.int({ min: 1, max: 100 });
 
-      await sendToSqs(JSON.stringify({ metricId, count }));
-
-      const event = await receiveFromSqs(1);
+      const event = buildSqsEvent(JSON.stringify({ metricId, count }));
 
       // Act
       const result = await handler(event);
@@ -257,27 +204,17 @@ describe('metric-updates-handler', () => {
       // Assert
       expect(result.batchItemFailures).toHaveLength(1);
       expect(result.batchItemFailures[0]?.itemIdentifier).toBe(event.Records[0]?.messageId);
-
-      for (const record of event.Records) {
-        await deleteFromSqs(record.receiptHandle);
-      }
     });
 
     it('should return batchItemFailures for zero count', async () => {
       // Arrange
-      await sendToSqs(buildBody({ count: 0 }));
-
-      const event = await receiveFromSqs(1);
+      const event = buildSqsEvent(buildBody({ count: 0 }));
 
       // Act
       const result = await handler(event);
 
       // Assert
       expect(result.batchItemFailures).toHaveLength(1);
-
-      for (const record of event.Records) {
-        await deleteFromSqs(record.receiptHandle);
-      }
     });
 
     it('should return batchItemFailures for invalid date format', async () => {
@@ -287,19 +224,13 @@ describe('metric-updates-handler', () => {
         .toISOString()
         .substring(0, 10);
 
-      await sendToSqs(buildBody({ date: invalidDate }));
-
-      const event = await receiveFromSqs(1);
+      const event = buildSqsEvent(buildBody({ date: invalidDate }));
 
       // Act
       const result = await handler(event);
 
       // Assert
       expect(result.batchItemFailures).toHaveLength(1);
-
-      for (const record of event.Records) {
-        await deleteFromSqs(record.receiptHandle);
-      }
     });
 
     it('should process valid records when one fails in a mixed batch', async () => {
@@ -311,11 +242,11 @@ describe('metric-updates-handler', () => {
       const count1 = faker.number.int({ min: 1, max: 100 });
       const count2 = faker.number.int({ min: 1, max: 100 });
 
-      await sendToSqs(buildBody({ workspaceId, metricId: metric1, count: count1, date }));
-      await sendToSqs('invalid-json');
-      await sendToSqs(buildBody({ workspaceId, metricId: metric2, count: count2, date }));
-
-      const event = await receiveFromSqs(3);
+      const event = buildSqsEvent(
+        buildBody({ workspaceId, metricId: metric1, count: count1, date }),
+        'invalid-json',
+        buildBody({ workspaceId, metricId: metric2, count: count2, date }),
+      );
 
       // Act
       const result = await handler(event);
@@ -330,10 +261,6 @@ describe('metric-updates-handler', () => {
       const third = await getItem(`WSP#${workspaceId}#MET#${metric2}`, `H#${date}`);
 
       expect(third.Item?.['count']?.N).toBe(String(count2));
-
-      for (const record of event.Records) {
-        await deleteFromSqs(record.receiptHandle);
-      }
     });
 
     it('should return empty batchItemFailures for empty Records array', async () => {

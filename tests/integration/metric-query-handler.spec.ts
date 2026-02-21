@@ -1,8 +1,8 @@
 import { faker } from '@faker-js/faker';
 
-import { buildBody } from './build-body';
-import { clearTable } from './clear-table';
-import { sendToSqs, receiveFromSqs, deleteFromSqs, purgeQueue } from './sqs-helpers';
+import { buildBody } from './helpers/build-body';
+import { buildSqsEvent } from './helpers/build-sqs-event';
+import { clearTable } from './helpers/clear-table';
 import { main as updatesHandler } from '../../src/metric-updates.handler';
 import { main as queryHandler } from '../../src/metric-query.handler';
 
@@ -14,22 +14,11 @@ function fakeDateHour(): string {
 }
 
 async function writeMetric(overrides: Record<string, unknown> = {}) {
-  const body = buildBody(overrides);
-
-  await sendToSqs(body);
-
-  const event = await receiveFromSqs(1);
-
-  await updatesHandler(event);
-
-  for (const record of event.Records) {
-    await deleteFromSqs(record.receiptHandle);
-  }
+  await updatesHandler(buildSqsEvent(buildBody(overrides)));
 }
 
 beforeEach(async () => {
   await clearTable();
-  await purgeQueue();
 });
 
 describe('metric-query-handler', () => {
