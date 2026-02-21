@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { DATE_HOUR_PATTERN } from './date-hour.pattern';
+import { DATE_HOUR_PATTERN, isValidCalendarDate } from './date-hour.pattern';
 import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from './identifier.pattern';
 
 const MAX_COUNT = 1_000_000;
@@ -23,12 +23,14 @@ export const metricUpdateMessageSchema = z.object({
       'metricId must contain only alphanumeric characters, hyphens, and underscores',
     ),
   count: z
-    .number({ error: 'count must be a positive finite number' })
-    .positive('count must be a positive finite number')
+    .number({ error: 'count must be a positive integer' })
+    .int('count must be a positive integer')
+    .positive('count must be a positive integer')
     .max(MAX_COUNT, `count must be at most ${MAX_COUNT}`),
   date: z
     .string({ error: 'date is required and must match YYYY-MM-DDThh format' })
-    .regex(DATE_HOUR_PATTERN, 'date is required and must match YYYY-MM-DDThh format'),
+    .regex(DATE_HOUR_PATTERN, 'date is required and must match YYYY-MM-DDThh format')
+    .refine(isValidCalendarDate, 'date contains an invalid calendar date'),
   userId: z
     .string({ error: 'userId must be a non-empty string' })
     .min(1, 'userId must be a non-empty string')

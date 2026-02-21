@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { DATE_HOUR_PATTERN } from './date-hour.pattern';
+import { DATE_HOUR_PATTERN, isValidCalendarDate } from './date-hour.pattern';
 import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from './identifier.pattern';
 import { getMaxDateRangeDays } from '../config/max-date-range-days.config';
 
@@ -35,10 +35,12 @@ export const metricQueryRequestSchema = z
       .optional(),
     fromDate: z
       .string({ error: 'fromDate is required and must match YYYY-MM-DDThh format' })
-      .regex(DATE_HOUR_PATTERN, 'fromDate is required and must match YYYY-MM-DDThh format'),
+      .regex(DATE_HOUR_PATTERN, 'fromDate is required and must match YYYY-MM-DDThh format')
+      .refine(isValidCalendarDate, 'fromDate contains an invalid calendar date'),
     toDate: z
       .string({ error: 'toDate is required and must match YYYY-MM-DDThh format' })
-      .regex(DATE_HOUR_PATTERN, 'toDate is required and must match YYYY-MM-DDThh format'),
+      .regex(DATE_HOUR_PATTERN, 'toDate is required and must match YYYY-MM-DDThh format')
+      .refine(isValidCalendarDate, 'toDate contains an invalid calendar date'),
   })
   .refine((data) => data.toDate >= data.fromDate, {
     error: 'toDate must not be before fromDate',

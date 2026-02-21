@@ -127,6 +127,20 @@ describe('validateQueryRequest', () => {
     ).toThrow('toDate is required and must match YYYY-MM-DDThh format');
   });
 
+  it('should throw when fromDate is an invalid calendar date', () => {
+    // Act & Assert
+    expect(() =>
+      validateQueryRequest({ ...fakeValidQueryRequest(), fromDate: '2024-02-31T00' }),
+    ).toThrow('fromDate contains an invalid calendar date');
+  });
+
+  it('should throw when toDate is an invalid calendar date', () => {
+    // Act & Assert
+    expect(() =>
+      validateQueryRequest({ ...fakeValidQueryRequest(), toDate: '2024-06-31T12' }),
+    ).toThrow('toDate contains an invalid calendar date');
+  });
+
   it('should throw when toDate is before fromDate', () => {
     // Act & Assert
     expect(() =>
@@ -262,7 +276,7 @@ describe('validateUpdateMessage', () => {
     const { count: _, ...input } = fakeValidUpdateMessage();
 
     // Act & Assert
-    expect(() => validateUpdateMessage(input)).toThrow('count must be a positive finite number');
+    expect(() => validateUpdateMessage(input)).toThrow('count must be a positive integer');
   });
 
   it('should throw when date is missing', () => {
@@ -276,28 +290,35 @@ describe('validateUpdateMessage', () => {
   it('should throw when count is zero', () => {
     // Act & Assert
     expect(() => validateUpdateMessage({ ...fakeValidUpdateMessage(), count: 0 })).toThrow(
-      'count must be a positive finite number',
+      'count must be a positive integer',
     );
   });
 
   it('should throw when count is negative', () => {
     // Act & Assert
     expect(() => validateUpdateMessage({ ...fakeValidUpdateMessage(), count: -1 })).toThrow(
-      'count must be a positive finite number',
+      'count must be a positive integer',
+    );
+  });
+
+  it('should throw when count is a fractional number', () => {
+    // Act & Assert
+    expect(() => validateUpdateMessage({ ...fakeValidUpdateMessage(), count: 1.5 })).toThrow(
+      'count must be a positive integer',
     );
   });
 
   it('should throw when count is NaN', () => {
     // Act & Assert
     expect(() => validateUpdateMessage({ ...fakeValidUpdateMessage(), count: NaN })).toThrow(
-      'count must be a positive finite number',
+      'count must be a positive integer',
     );
   });
 
   it('should throw when count is Infinity', () => {
     // Act & Assert
     expect(() => validateUpdateMessage({ ...fakeValidUpdateMessage(), count: Infinity })).toThrow(
-      'count must be a positive finite number',
+      'count must be a positive integer',
     );
   });
 
@@ -308,7 +329,7 @@ describe('validateUpdateMessage', () => {
         ...fakeValidUpdateMessage(),
         count: String(faker.number.int({ min: 1, max: 100 })),
       }),
-    ).toThrow('count must be a positive finite number');
+    ).toThrow('count must be a positive integer');
   });
 
   it('should throw when date has invalid format', () => {
@@ -322,6 +343,13 @@ describe('validateUpdateMessage', () => {
     expect(() => validateUpdateMessage({ ...fakeValidUpdateMessage(), date: invalidDate })).toThrow(
       'date is required and must match YYYY-MM-DDThh format',
     );
+  });
+
+  it('should throw when date is an invalid calendar date', () => {
+    // Act & Assert
+    expect(() =>
+      validateUpdateMessage({ ...fakeValidUpdateMessage(), date: '2024-02-31T14' }),
+    ).toThrow('date contains an invalid calendar date');
   });
 
   it('should throw when input is null', () => {
