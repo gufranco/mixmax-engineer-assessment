@@ -9,7 +9,7 @@ A serverless system for tracking and querying usage metrics across workspaces an
 SQS Queue ────────► │  Updates        │ ──────► DynamoDB
 (metric updates)    │  Handler        │         (single table)
                     └─────────────────┘
-                                                    ▲
+                                                     ▲
                     ┌─────────────────┐              │
 Direct invoke ────► │  Query Handler  │ ─────────────┘
 (metric queries)    │  Lambda         │
@@ -18,7 +18,7 @@ Direct invoke ────► │  Query Handler  │ ────────�
 
 The **Updates Handler** processes SQS messages containing metric updates and writes both hourly and daily counters to DynamoDB. For each message, it writes workspace-level metrics and optionally user-level metrics.
 
-The **Query Handler** is invoked directly to query usage metrics from DynamoDB. It aggregates hourly counters across a date range and returns the total count.
+The **Query Handler** is invoked directly to query usage metrics from DynamoDB. When the date range covers full days (e.g. `T00` to `T23`), it reads daily rollup keys instead of hourly keys, reducing DynamoDB reads by up to 24x. For partial-day ranges, it falls back to hourly keys and aggregates the counters.
 
 Both handlers share a single DynamoDB table using a composite key design with `pk` (partition key) and `sk` (sort key). A single table keeps all access patterns co-located under one billing unit and avoids cross-table coordination.
 
@@ -36,7 +36,7 @@ DynamoDB's `ADD` operation is commutative but not idempotent. If a partial failu
 src/
   config/           # Environment variable readers with safe defaults
   errors/           # ValidationError class, error formatting utility
-  infrastructure/   # DynamoDB client, repository, key builders, TTL calculation
+  infrastructure/   # DynamoDB client, repository, key builders, TTL, query granularity
   logging/          # Pino structured logger
   schemas/          # Zod schemas, regex patterns, identifier constraints
   types/            # TypeScript interfaces derived from schemas
@@ -105,7 +105,7 @@ An SQS-triggered Lambda that processes usage tracking events. Each message repre
 | `workspaceId` | Yes | string | Workspace identifier. Always writes a `WSP#` entry. Alphanumeric, hyphens, and underscores only. Max 128 characters |
 | `userId` | No | string | User identifier. If provided, also writes a `USR#` entry. Same format constraints as above |
 | `metricId` | Yes | string | The metric name (e.g. `"emails-sent"`). Same format constraints as above |
-| `count` | Yes | number | The increment amount. Must be a positive finite number, max 1,000,000 |
+| `count` | Yes | number | The increment amount. Must be a positive integer, max 1,000,000 |
 | `date` | Yes | `YYYY-MM-DDThh` | The date and hour the usage occurred |
 
 ## DynamoDB Schema
@@ -127,7 +127,7 @@ Each item also contains:
 
 ### Type safety and validation
 
-Zod schemas are the single source of truth for both runtime validation and compile-time types. TypeScript types are derived via `z.infer<typeof schema>`, which eliminates drift between what the validator accepts and what the code expects. There is zero `any` in production code. The query handler returns validation errors as structured data (`{ error: { code, message } }`) so callers can distinguish "fix your input" from "retry later," and CloudWatch error metrics only reflect real system failures.
+Zod schemas are the single source of truth for both runtime validation and compile-time types. TypeScript types are derived via `z.infer<typeof schema>`, which eliminates drift between what the validator accepts and what the code expects. There is zero `any` in production code. Validation goes beyond format: date fields are checked against the calendar (e.g. `2024-02-31` is rejected even though it matches the regex), count must be a positive integer, and all identifiers are validated against `/^[a-zA-Z0-9_-]+$/` to prevent `#` injection into DynamoDB keys. The query handler returns validation errors as structured data (`{ error: { code, message } }`) so callers can distinguish "fix your input" from "retry later," and CloudWatch error metrics only reflect real system failures.
 
 ### Error handling
 
@@ -135,15 +135,15 @@ The updates handler processes each SQS record independently with its own try/cat
 
 ### Observability
 
-Pino produces structured JSON logs with a `requestId` field (the Lambda `awsRequestId`) on every log line, making CloudWatch Logs Insights queries straightforward. AWS X-Ray is active on both handlers, so the full request path, from Lambda cold start through DynamoDB query latency, is visible in trace waterfalls without manual instrumentation. CloudWatch error alarms on both handlers are wired to an SNS topic for notifications. Log level is configurable per environment via a SAM parameter.
+Pino produces structured JSON logs with a `requestId` field (the Lambda `awsRequestId`) on every log line, making CloudWatch Logs Insights queries straightforward. Error logs preserve the full stack trace via `error.stack`, so root cause analysis doesn't require reproducing the failure. AWS X-Ray is active on both handlers, so the full request path, from Lambda cold start through DynamoDB query latency, is visible in trace waterfalls without manual instrumentation. CloudWatch error alarms on both handlers are wired to an SNS topic for notifications. Log level is configurable per environment via a SAM parameter.
 
 ### Testing
 
-Zero mocks. Unit tests validate pure functions like validation, key building, and config readers. Integration tests run handlers against real DynamoDB and SQS on LocalStack. Messages go through the actual SQS round-trip: `sendMessage`, `receiveMessage`, handler invocation, `deleteMessage`, exercising the full serialization path. All tests follow the Arrange-Act-Assert pattern with explicit comments. 84 tests total, 56 unit and 28 integration.
+Zero mocks. Unit tests validate pure functions like validation, key building, date granularity logic, and config readers. Integration tests run handlers against real DynamoDB on LocalStack. SQS events are constructed in-memory using a `buildSqsEvent` helper that produces realistic `SQSEvent` objects, keeping the test focused on handler logic and DynamoDB behavior rather than testing the SQS transport layer. All tests follow the Arrange-Act-Assert pattern with explicit comments. 96 tests total, 68 unit and 28 integration.
 
 ### Security
 
-All identifier fields validate against a shared regex allowlist (`/^[a-zA-Z0-9_-]+$/`, max 128 characters) to prevent `#` injection into DynamoDB partition keys. The `count` field caps at 1,000,000 to prevent a single message from inflating metrics by an arbitrary amount. IAM policies follow least privilege: the query handler has `dynamodb:Query` only, the updates handler has `dynamodb:UpdateItem` only, both scoped to the specific table ARN.
+All identifier fields validate against a shared regex allowlist (`/^[a-zA-Z0-9_-]+$/`, max 128 characters) to prevent `#` injection into DynamoDB partition keys. The `count` field must be a positive integer capped at 1,000,000 to prevent a single message from inflating metrics by an arbitrary amount. IAM policies follow least privilege: the query handler has `dynamodb:Query` only, the updates handler has `dynamodb:UpdateItem` only, both scoped to the specific table ARN. SQS queues use server-side encryption at rest.
 
 ## Prerequisites
 
@@ -276,7 +276,7 @@ aws lambda invoke \
 pnpm test
 ```
 
-**Integration tests** run handlers against real DynamoDB on LocalStack. Start LocalStack first:
+**Integration tests** run handlers against real DynamoDB on LocalStack. SQS events are constructed in-memory, so LocalStack only needs DynamoDB. Start LocalStack first:
 
 ```bash
 pnpm localstack:up
@@ -336,9 +336,9 @@ The DLQ depth alarm is not parameterized: it fires on any message in the DLQ, wh
 
 ### Resources
 
-- **DynamoDB table**: PAY_PER_REQUEST billing, TTL enabled.
-- **SQS queue**: Wired to a dead letter queue via RedrivePolicy.
-- **Dead letter queue**: Holds messages that failed all retry attempts.
+- **DynamoDB table**: PAY_PER_REQUEST billing, TTL enabled, Point-in-Time Recovery for continuous backups, `DeletionPolicy: Retain` to prevent accidental deletion via CloudFormation.
+- **SQS queue**: Wired to a dead letter queue via RedrivePolicy. Server-side encryption enabled.
+- **Dead letter queue**: Holds messages that failed all retry attempts. Server-side encryption enabled.
 - **CloudWatch alarms**: DLQ depth alarm, updates handler error alarm, and query handler error alarm, all wired to an SNS notification topic.
 - **SNS topic**: Subscribe an email, Slack webhook, or PagerDuty endpoint to receive alarm notifications.
 - **X-Ray tracing**: Active on both handlers for distributed request tracing.
@@ -501,16 +501,16 @@ aws xray get-trace-summaries \
 
 GitHub Actions runs on every push and PR to `main`:
 
-- **lint-and-typecheck**: ESLint + TypeScript compilation
+- **lint-and-typecheck**: ESLint + `pnpm typecheck` (strict `tsc --noEmit`)
 - **unit-tests**: Pure function tests, no external deps
-- **integration-tests**: Starts LocalStack as a service container, initializes resources, and runs handler tests against real DynamoDB
+- **integration-tests**: Starts LocalStack as a service container, initializes DynamoDB, and runs handler tests against real DynamoDB
 
-Locally, Husky pre-commit hooks run lint-staged to catch formatting and lint issues before they reach CI.
+Locally, Husky pre-commit hooks run lint-staged (ESLint + Prettier on staged files) and `pnpm typecheck`. Pre-push hooks run the full suite: lint, format check, typecheck, and all tests.
 
 ## Building and Deploying
 
 ```bash
-# Build
+# Build (esbuild, minified with source maps for readable stack traces)
 pnpm build
 
 # Deploy (requires AWS credentials)
