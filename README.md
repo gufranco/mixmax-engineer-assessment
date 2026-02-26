@@ -1,5 +1,7 @@
 # Feature Usage Lambdas
 
+> **Technical assessment for the Senior Platform Engineer position at [Mixmax](https://www.mixmax.com).** Mixmax is an AI-native Sales Execution platform helping revenue teams close more deals. The platform engineering role focuses on internal platform, production infrastructure, and developer experience across a stack of TypeScript/Node.js, AWS (Lambda, EventBridge, DynamoDB, SQS), Terraform, and observability tooling (Datadog, OpenTelemetry).
+
 A serverless system for tracking and querying usage metrics across workspaces and individual users, built with AWS Lambda, DynamoDB, and SQS. Designed for operational visibility, data integrity at the boundary, and graceful degradation under partial failures.
 
 ## Architecture
