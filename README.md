@@ -18,7 +18,7 @@ Direct invoke ────► │  Query Handler  │ ────────�
 
 The **Updates Handler** processes SQS messages containing metric updates and writes both hourly and daily counters to DynamoDB. For each message, it writes workspace-level metrics and optionally user-level metrics.
 
-The **Query Handler** is invoked directly to query usage metrics from DynamoDB. When the date range covers full days (e.g. `T00` to `T23`), it reads daily rollup keys instead of hourly keys, reducing DynamoDB reads by up to 24x. For partial-day ranges, it falls back to hourly keys and aggregates the counters.
+The **Query Handler** is invoked directly to query usage metrics from DynamoDB. It splits date ranges into optimal segments: full days in the middle use daily rollup keys, while partial days at the edges use hourly keys. A query from `2024-01-15T05` to `2024-01-20T18` issues 3 parallel queries: hourly keys for the 15th from T05, daily rollups for the 16th through 19th, and hourly keys for the 20th through T18. This reduces DynamoDB reads by up to 24x for the full-day portion.
 
 Both handlers share a single DynamoDB table using a composite key design with `pk` (partition key) and `sk` (sort key). A single table keeps all access patterns co-located under one billing unit and avoids cross-table coordination.
 
@@ -26,9 +26,11 @@ Both handlers share a single DynamoDB table using a composite key design with `p
 
 Counter increments are commutative: `ADD 5` followed by `ADD 3` produces the same result as `ADD 3` followed by `ADD 5`. Message ordering is irrelevant, so FIFO's ordering guarantee adds no value. FIFO's deduplication window is only 5 minutes, too short for real protection during DLQ replay or operational incidents. Standard SQS has nearly unlimited throughput with no configuration, while FIFO caps at 300 msg/s per message group without batching, exactly at this system's target.
 
-### At-least-once counting
+### Idempotent, atomic writes
 
-DynamoDB's `ADD` operation is commutative but not idempotent. If a partial failure causes SQS to retry a message, counters that already succeeded on the first attempt get incremented again. For aggregate usage metrics, the difference between 10,000 and 10,001 is not meaningful. Making writes atomic with `TransactWriteItems` would double the write capacity cost for a guarantee the use case doesn't need.
+Each SQS message is processed exactly once using `TransactWriteItems`. The transaction includes a deduplication record keyed by the SQS `messageId` with an `attribute_not_exists(pk)` condition, alongside the hourly and daily counter updates. If SQS redelivers a message, the condition check fails and the entire transaction is cancelled, preventing double-counting. Dedup records auto-expire after 24 hours via DynamoDB TTL.
+
+This costs 2x the write capacity per item compared to individual `UpdateItem` calls. The trade-off is correct: data integrity matters more than write cost savings, and PAY_PER_REQUEST billing absorbs the overhead without provisioning changes.
 
 ## Project Structure
 
@@ -79,10 +81,13 @@ Validation errors return a structured response instead of throwing:
 {
   "error": {
     "code": "VALIDATION_ERROR",
-    "message": "metricId is required and must be a non-empty string"
+    "message": "metricId is required and must be a non-empty string",
+    "requestId": "abc-123-def"
   }
 }
 ```
+
+The `requestId` field maps to the Lambda `awsRequestId`, making it trivial for callers to correlate errors with CloudWatch logs.
 
 ## Lambda 2: metric-updates-handler
 
@@ -118,12 +123,19 @@ Single table design with composite key (`pk`, `sk`). Partition keys use `#` as a
 | User daily metric | `USR#{userId}#MET#{metricId}` | `D#YYYY-MM-DD` |
 | Workspace hourly metric | `WSP#{workspaceId}#MET#{metricId}` | `H#YYYY-MM-DDThh` |
 | Workspace daily metric | `WSP#{workspaceId}#MET#{metricId}` | `D#YYYY-MM-DD` |
+| Dedup record | `DEDUP#{messageId}` | `DEDUP#{messageId}` |
 
-Each item also contains:
+Each metric item also contains:
 - `count` (N): the accumulated metric count
 - `ttl` (N): epoch seconds for automatic expiration, refreshed on every write so actively used metrics stay alive while stale data expires (90 days default, configurable per environment)
 
+Dedup records contain only `ttl` and auto-expire after 24 hours. They exist solely to prevent double-counting on SQS message redelivery.
+
 ## Design Decisions
+
+### Connection management
+
+The DynamoDB client uses explicit timeouts via `NodeHttpHandler`: 3 seconds for connection and 5 seconds for request. Without these, a hanging DynamoDB call would consume the full 30-second Lambda timeout, wasting concurrency slots and delaying error detection. Explicit timeouts ensure that transient network issues are caught quickly and classified as retryable failures.
 
 ### Type safety and validation
 
@@ -131,7 +143,13 @@ Zod schemas are the single source of truth for both runtime validation and compi
 
 ### Error handling
 
-The updates handler processes each SQS record independently with its own try/catch. Within a record, all DynamoDB writes fire in parallel via `Promise.all`. If any write fails, the entire record is reported in `batchItemFailures` and only that record is retried by SQS. Records that succeed are not retried, preventing unnecessary double-counting. After 3 failed attempts, messages move to a dead letter queue. A CloudWatch alarm fires when any message arrives in the DLQ, and `scripts/replay-dlq.sh` replays messages back to the main queue after the root cause is fixed.
+The updates handler classifies every error as transient or permanent before deciding what to do with it.
+
+**Permanent errors** (malformed JSON, validation failures, access denied): the message is acknowledged and dropped. Retrying it would produce the same result, so it skips the retry cycle entirely. The error is logged at warn level with `permanent: true` for monitoring.
+
+**Transient errors** (DynamoDB throttling, timeouts, service unavailable, transaction conflicts): the message is returned in `batchItemFailures` so SQS retries it. After the configured `maxReceiveCount` attempts, it moves to the dead letter queue. The error is logged at warn level with `transient: true`.
+
+This means the DLQ only contains messages that failed due to repeated transient issues, making it a reliable signal that something is wrong with the infrastructure rather than noise from bad input data. A CloudWatch alarm fires when any message arrives in the DLQ, and `scripts/replay-dlq.sh` replays messages back to the main queue after the root cause is fixed.
 
 ### Observability
 
@@ -139,11 +157,11 @@ Pino produces structured JSON logs with a `requestId` field (the Lambda `awsRequ
 
 ### Testing
 
-Zero mocks. Unit tests validate pure functions like validation, key building, date granularity logic, and config readers. Integration tests run handlers against real DynamoDB on LocalStack. SQS events are constructed in-memory using a `buildSqsEvent` helper that produces realistic `SQSEvent` objects, keeping the test focused on handler logic and DynamoDB behavior rather than testing the SQS transport layer. All tests follow the Arrange-Act-Assert pattern with explicit comments. 96 tests total, 68 unit and 28 integration.
+Zero mocks. Unit tests validate pure functions like validation, key building, query segmentation, error classification, and config readers. Integration tests run handlers against real DynamoDB on LocalStack, including deduplication verification and mixed-range query optimization. SQS events are constructed in-memory using a `buildSqsEvent` helper that produces realistic `SQSEvent` objects, keeping the test focused on handler logic and DynamoDB behavior rather than testing the SQS transport layer. All tests follow the Arrange-Act-Assert pattern with explicit comments.
 
 ### Security
 
-All identifier fields validate against a shared regex allowlist (`/^[a-zA-Z0-9_-]+$/`, max 128 characters) to prevent `#` injection into DynamoDB partition keys. The `count` field must be a positive integer capped at 1,000,000 to prevent a single message from inflating metrics by an arbitrary amount. IAM policies follow least privilege: the query handler has `dynamodb:Query` only, the updates handler has `dynamodb:UpdateItem` only, both scoped to the specific table ARN. SQS queues use server-side encryption at rest.
+All identifier fields validate against a shared regex allowlist (`/^[a-zA-Z0-9_-]+$/`, max 128 characters) to prevent `#` injection into DynamoDB partition keys. The `count` field must be a positive integer capped at 1,000,000 to prevent a single message from inflating metrics by an arbitrary amount. IAM policies follow least privilege: the query handler has `dynamodb:Query` only, the updates handler has `dynamodb:UpdateItem` and `dynamodb:PutItem` only, both scoped to the specific table ARN. SQS queues use server-side encryption at rest.
 
 ## Prerequisites
 
@@ -314,6 +332,7 @@ sam deploy --parameter-overrides Env=production TtlDays=180 ReservedConcurrency=
 | `ReservedConcurrency` | `10` | Max concurrent executions for the updates handler |
 | `QueryReservedConcurrency` | `10` | Max concurrent executions for the query handler |
 | `LogLevel` | `info` | Minimum log level for Lambda functions. Allowed: `debug`, `info`, `warn`, `error` |
+| `LogRetentionDays` | `30` | CloudWatch log group retention in days. Prevents unbounded log storage costs |
 
 ### SQS parameters
 
@@ -342,18 +361,22 @@ The DLQ depth alarm is not parameterized: it fires on any message in the DLQ, wh
 - **CloudWatch alarms**: DLQ depth alarm, updates handler error alarm, and query handler error alarm, all wired to an SNS notification topic.
 - **SNS topic**: Subscribe an email, Slack webhook, or PagerDuty endpoint to receive alarm notifications.
 - **X-Ray tracing**: Active on both handlers for distributed request tracing.
-- **IAM least-privilege**: Query handler has `dynamodb:Query` only. Updates handler has `dynamodb:UpdateItem` only.
+- **Lambda Insights**: CloudWatch Lambda Insights extension provides memory usage, cold start duration, and CPU metrics. The managed policy `CloudWatchLambdaInsightsExecutionRolePolicy` is attached to both handlers.
+- **CloudWatch log groups**: Explicit log groups with configurable retention (default 30 days) prevent unbounded log storage costs. Without this, AWS defaults to infinite retention.
+- **IAM least-privilege**: Query handler has `dynamodb:Query` only. Updates handler has `dynamodb:UpdateItem` and `dynamodb:PutItem` (for dedup records within `TransactWriteItems`).
 - **Batch failure reporting**: `ReportBatchItemFailures` enabled so only failed records are retried, not the entire batch.
 
 ## Error Handling
 
-The updates handler uses **partial batch failure reporting**. When processing a batch of SQS messages:
+The updates handler uses **partial batch failure reporting** with **error classification**. When processing a batch of SQS messages:
 
 1. Each record is processed independently with its own try/catch.
 2. Valid records succeed even if others in the batch fail.
-3. Failed records are returned in `batchItemFailures` and only those are retried by SQS.
-4. After 3 failed attempts (maxReceiveCount), messages move to the dead letter queue.
-5. The DLQ depth alarm fires when any messages arrive in the DLQ.
+3. Errors are classified as transient or permanent using the error's name and HTTP status code.
+4. Permanent errors (validation, bad input) are dropped immediately. The message is acknowledged so SQS does not retry it.
+5. Transient errors (throttling, timeouts) are returned in `batchItemFailures` and only those are retried by SQS.
+6. After the configured `maxReceiveCount` retries, messages move to the dead letter queue.
+7. The DLQ depth alarm fires when any messages arrive in the DLQ.
 
 The query handler validates all input before querying DynamoDB. Invalid requests return a structured error response with a `VALIDATION_ERROR` code and a descriptive message. System errors (DynamoDB failures, unexpected exceptions) still throw, causing Lambda to report the invocation as failed.
 
@@ -379,7 +402,7 @@ DLQ_URL=https://sqs.us-east-1.amazonaws.com/123456789/feature-usage-updates-dlq-
 
 #### DLQ Alert: Messages in Dead Letter Queue
 
-`DLQDepthAlarm` fires when `ApproximateNumberOfMessagesVisible > 0`. Messages in the DLQ represent metric updates that failed 3 times and were not processed.
+`DLQDepthAlarm` fires when `ApproximateNumberOfMessagesVisible > 0`. Because permanent errors (bad input, validation failures) are dropped at the handler level, messages in the DLQ represent transient failures that exhausted all retry attempts. This is a strong signal of infrastructure issues.
 
 **1. Assess the situation:**
 
@@ -400,16 +423,16 @@ aws sqs receive-message \
 
 | Body looks like | Likely cause |
 |----------------|-------------|
-| Malformed JSON | Producer bug, message corruption |
-| Valid JSON but missing fields | Schema change without backward compatibility |
-| Valid JSON with expected fields | DynamoDB write failure, throttling, or transient error |
+| Valid JSON with expected fields | DynamoDB throttling, timeout, or transient AWS issue |
+
+Malformed JSON and validation errors are classified as permanent and dropped at the handler level. They never reach the DLQ.
 
 **3. Check Lambda logs:**
 
 ```bash
 aws logs filter-log-events \
   --log-group-name /aws/lambda/<FUNCTION_NAME> \
-  --filter-pattern '"record failed"' \
+  --filter-pattern '"transient error" OR "permanent error"' \
   --start-time <EPOCH_MS> \
   --end-time <EPOCH_MS>
 ```
@@ -449,7 +472,7 @@ aws sqs purge-queue --queue-url <DLQ_URL>
 ```bash
 aws logs filter-log-events \
   --log-group-name /aws/lambda/<FUNCTION_NAME> \
-  --filter-pattern '"query failed" OR "record failed" OR "batch partially failed"' \
+  --filter-pattern '"query failed" OR "transient error" OR "permanent error" OR "batch partially failed"' \
   --start-time <EPOCH_MS>
 ```
 
