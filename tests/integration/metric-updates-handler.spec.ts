@@ -179,7 +179,7 @@ describe('metric-updates-handler', () => {
   });
 
   describe('error handling', () => {
-    it('should return batchItemFailures for malformed JSON', async () => {
+    it('should drop malformed JSON as permanent error without retrying', async () => {
       // Arrange
       const event = buildSqsEvent('not-json{{{');
 
@@ -187,11 +187,10 @@ describe('metric-updates-handler', () => {
       const result = await handler(event);
 
       // Assert
-      expect(result.batchItemFailures).toHaveLength(1);
-      expect(result.batchItemFailures[0]?.itemIdentifier).toBe(event.Records[0]?.messageId);
+      expect(result.batchItemFailures).toHaveLength(0);
     });
 
-    it('should return batchItemFailures for missing required field', async () => {
+    it('should drop missing required field as permanent error without retrying', async () => {
       // Arrange
       const metricId = faker.string.alphanumeric(10);
       const count = faker.number.int({ min: 1, max: 100 });
@@ -202,11 +201,10 @@ describe('metric-updates-handler', () => {
       const result = await handler(event);
 
       // Assert
-      expect(result.batchItemFailures).toHaveLength(1);
-      expect(result.batchItemFailures[0]?.itemIdentifier).toBe(event.Records[0]?.messageId);
+      expect(result.batchItemFailures).toHaveLength(0);
     });
 
-    it('should return batchItemFailures for zero count', async () => {
+    it('should drop zero count as permanent error without retrying', async () => {
       // Arrange
       const event = buildSqsEvent(buildBody({ count: 0 }));
 
@@ -214,10 +212,10 @@ describe('metric-updates-handler', () => {
       const result = await handler(event);
 
       // Assert
-      expect(result.batchItemFailures).toHaveLength(1);
+      expect(result.batchItemFailures).toHaveLength(0);
     });
 
-    it('should return batchItemFailures for invalid date format', async () => {
+    it('should drop invalid date format as permanent error without retrying', async () => {
       // Arrange
       const invalidDate = faker.date
         .between({ from: '2023-01-01', to: '2025-12-31' })
@@ -230,10 +228,10 @@ describe('metric-updates-handler', () => {
       const result = await handler(event);
 
       // Assert
-      expect(result.batchItemFailures).toHaveLength(1);
+      expect(result.batchItemFailures).toHaveLength(0);
     });
 
-    it('should process valid records when one fails in a mixed batch', async () => {
+    it('should process valid records and drop invalid ones in a mixed batch', async () => {
       // Arrange
       const workspaceId = faker.string.alphanumeric(8);
       const metric1 = faker.string.alphanumeric(10);
@@ -252,7 +250,7 @@ describe('metric-updates-handler', () => {
       const result = await handler(event);
 
       // Assert
-      expect(result.batchItemFailures).toHaveLength(1);
+      expect(result.batchItemFailures).toHaveLength(0);
 
       const first = await getItem(`WSP#${workspaceId}#MET#${metric1}`, `H#${date}`);
 
@@ -272,6 +270,70 @@ describe('metric-updates-handler', () => {
 
       // Assert
       expect(result.batchItemFailures).toHaveLength(0);
+    });
+  });
+
+  describe('deduplication', () => {
+    it('should not double-increment when the same messageId is processed twice', async () => {
+      // Arrange
+      const workspaceId = faker.string.alphanumeric(8);
+      const metricId = faker.string.alphanumeric(10);
+      const date = fakeDateHour();
+      const count = faker.number.int({ min: 1, max: 100 });
+
+      const event = buildSqsEvent(buildBody({ workspaceId, metricId, date, count }));
+
+      await handler(event);
+
+      // Act
+      const result = await handler(event);
+
+      // Assert
+      expect(result.batchItemFailures).toHaveLength(0);
+
+      const hourly = await getItem(`WSP#${workspaceId}#MET#${metricId}`, `H#${date}`);
+
+      expect(hourly.Item?.['count']?.N).toBe(String(count));
+    });
+
+    it('should write a dedup record with 24-hour TTL', async () => {
+      // Arrange
+      const event = buildSqsEvent(buildBody({}));
+      const messageId = event.Records[0]?.messageId;
+
+      // Act
+      await handler(event);
+
+      // Assert
+      const dedup = await getItem(`DEDUP#${messageId}`, `DEDUP#${messageId}`);
+
+      expect(dedup.Item).toBeDefined();
+
+      const ttl = Number(dedup.Item?.['ttl']?.N);
+      const now = Math.floor(Date.now() / 1000);
+      const oneDay = 24 * 60 * 60;
+
+      expect(ttl).toBeGreaterThan(now + oneDay - 60);
+      expect(ttl).toBeLessThan(now + oneDay + 60);
+    });
+
+    it('should still accumulate counts from different messageIds', async () => {
+      // Arrange
+      const workspaceId = faker.string.alphanumeric(8);
+      const metricId = faker.string.alphanumeric(10);
+      const date = fakeDateHour();
+      const count1 = faker.number.int({ min: 1, max: 100 });
+      const count2 = faker.number.int({ min: 1, max: 100 });
+
+      await handler(buildSqsEvent(buildBody({ workspaceId, metricId, date, count: count1 })));
+
+      // Act
+      await handler(buildSqsEvent(buildBody({ workspaceId, metricId, date, count: count2 })));
+
+      // Assert
+      const hourly = await getItem(`WSP#${workspaceId}#MET#${metricId}`, `H#${date}`);
+
+      expect(hourly.Item?.['count']?.N).toBe(String(count1 + count2));
     });
   });
 });

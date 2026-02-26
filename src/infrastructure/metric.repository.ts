@@ -1,16 +1,26 @@
-import { QueryCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
+import {
+  QueryCommand,
+  TransactWriteItemsCommand,
+  TransactionCanceledException,
+} from '@aws-sdk/client-dynamodb';
 
+import type { TransactWriteItem } from '@aws-sdk/client-dynamodb';
 import type { MetricQueryRequest } from '../types/metric-query-request.type';
 import type { MetricRepository } from '../types/metric-repository.interface';
 import type { MetricUpdateMessage } from '../types/metric-update-message.type';
+import type { QuerySegment } from './query-granularity.util';
 import { buildPartitionKey } from './partition-key.builder';
 import { buildSortKey } from './sort-key.builder';
-import { isFullDayRange } from './query-granularity.util';
+import { buildQuerySegments } from './query-granularity.util';
 import { calculateTtl } from './calculate-ttl.util';
 import { dynamoClient } from './dynamo.client';
 import { getTableName } from '../config/table-name.config';
 
-interface UpdateCommandParams {
+// Must exceed SQS maxReceiveCount * VisibilityTimeout to cover all redelivery attempts.
+// Default: 3 retries * 60s = 180s. 24 hours provides a wide safety margin.
+const DEDUP_TTL_SECONDS = 24 * 60 * 60;
+
+interface UpdateParams {
   tableName: string;
   pk: string;
   sk: string;
@@ -18,27 +28,53 @@ interface UpdateCommandParams {
   ttl: number;
 }
 
-function buildUpdateCommand(params: UpdateCommandParams): UpdateItemCommand {
-  return new UpdateItemCommand({
-    TableName: params.tableName,
-    Key: {
-      pk: { S: params.pk },
-      sk: { S: params.sk },
+function buildUpdateTransactItem(params: UpdateParams): TransactWriteItem {
+  return {
+    Update: {
+      TableName: params.tableName,
+      Key: {
+        pk: { S: params.pk },
+        sk: { S: params.sk },
+      },
+      UpdateExpression: 'ADD #count :inc SET #ttl = :ttl',
+      ExpressionAttributeNames: {
+        '#count': 'count',
+        '#ttl': 'ttl',
+      },
+      ExpressionAttributeValues: {
+        ':inc': { N: params.count.toString() },
+        ':ttl': { N: params.ttl.toString() },
+      },
     },
-    UpdateExpression: 'ADD #count :inc SET #ttl = :ttl',
-    ExpressionAttributeNames: {
-      '#count': 'count',
-      '#ttl': 'ttl',
+  };
+}
+
+function buildDeduplicationItem(tableName: string, messageId: string): TransactWriteItem {
+  const ttl = Math.floor(Date.now() / 1000) + DEDUP_TTL_SECONDS;
+
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        pk: { S: `DEDUP#${messageId}` },
+        sk: { S: `DEDUP#${messageId}` },
+        ttl: { N: ttl.toString() },
+      },
+      ConditionExpression: 'attribute_not_exists(pk)',
     },
-    ExpressionAttributeValues: {
-      ':inc': { N: params.count.toString() },
-      ':ttl': { N: params.ttl.toString() },
-    },
-  });
+  };
+}
+
+function isDuplicateMessage(error: unknown): boolean {
+  if (!(error instanceof TransactionCanceledException)) {
+    return false;
+  }
+
+  return error.CancellationReasons?.[0]?.Code === 'ConditionalCheckFailed';
 }
 
 class DynamoMetricRepository implements MetricRepository {
-  async incrementMetric(message: MetricUpdateMessage): Promise<void> {
+  async incrementMetric(message: MetricUpdateMessage, messageId: string): Promise<boolean> {
     const tableName = getTableName();
     const ttl = calculateTtl();
 
@@ -47,28 +83,40 @@ class DynamoMetricRepository implements MetricRepository {
       ...(message.userId ? [{ type: 'user' as const, id: message.userId }] : []),
     ];
 
-    const commands = partitions.flatMap(({ type, id }) => {
+    const transactItems: TransactWriteItem[] = [buildDeduplicationItem(tableName, messageId)];
+
+    for (const { type, id } of partitions) {
       const pk = buildPartitionKey(type, id, message.metricId);
 
-      return [
-        buildUpdateCommand({
+      transactItems.push(
+        buildUpdateTransactItem({
           tableName,
           pk,
           sk: buildSortKey('hourly', message.date),
           count: message.count,
           ttl,
         }),
-        buildUpdateCommand({
+        buildUpdateTransactItem({
           tableName,
           pk,
           sk: buildSortKey('daily', message.date),
           count: message.count,
           ttl,
         }),
-      ];
-    });
+      );
+    }
 
-    await Promise.all(commands.map((cmd) => dynamoClient.send(cmd)));
+    try {
+      await dynamoClient.send(new TransactWriteItemsCommand({ TransactItems: transactItems }));
+
+      return false;
+    } catch (error) {
+      if (isDuplicateMessage(error)) {
+        return true;
+      }
+
+      throw error;
+    }
   }
 
   async queryMetricCount(query: MetricQueryRequest): Promise<number> {
@@ -78,9 +126,22 @@ class DynamoMetricRepository implements MetricRepository {
       ? buildPartitionKey('user', query.userId, query.metricId)
       : buildPartitionKey('workspace', query.workspaceId, query.metricId);
 
-    const granularity = isFullDayRange(query.fromDate, query.toDate) ? 'daily' : 'hourly';
-    const fromSk = buildSortKey(granularity, query.fromDate);
-    const toSk = buildSortKey(granularity, query.toDate);
+    const segments = buildQuerySegments(query.fromDate, query.toDate);
+
+    const counts = await Promise.all(
+      segments.map((segment) => this.querySegment(tableName, pk, segment)),
+    );
+
+    return counts.reduce((sum, count) => sum + count, 0);
+  }
+
+  private async querySegment(
+    tableName: string,
+    pk: string,
+    segment: QuerySegment,
+  ): Promise<number> {
+    const fromSk = buildSortKey(segment.granularity, segment.fromDate);
+    const toSk = buildSortKey(segment.granularity, segment.toDate);
 
     let totalCount = 0;
     let exclusiveStartKey: Record<string, { S: string }> | undefined;

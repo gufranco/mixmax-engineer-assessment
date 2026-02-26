@@ -6,7 +6,9 @@ import type {
   SQSRecord,
 } from 'aws-lambda';
 import { validateUpdateMessage } from './validators/update-message.validator';
+import { ValidationError } from './errors/validation.error';
 import { metricRepository } from './infrastructure/metric.repository';
+import { isTransientError } from './infrastructure/error-classifier.util';
 import { formatErrorMessage } from './errors/format-error-message.util';
 import { logger } from './logging/logger';
 
@@ -14,7 +16,7 @@ function parseRecordBody(record: SQSRecord): unknown {
   try {
     return JSON.parse(record.body);
   } catch {
-    throw new Error(`malformed JSON in message ${record.messageId}: ${record.body}`);
+    throw new ValidationError(`malformed JSON in message ${record.messageId}: ${record.body}`);
   }
 }
 
@@ -31,17 +33,37 @@ export const main = async (
         const parsed = parseRecordBody(record);
         const message = validateUpdateMessage(parsed);
 
-        await metricRepository.incrementMetric(message);
-        log.info({ messageId: record.messageId }, 'record processed');
+        const deduplicated = await metricRepository.incrementMetric(message, record.messageId);
+
+        if (deduplicated) {
+          log.debug({ messageId: record.messageId }, 'duplicate message skipped');
+        } else {
+          log.info({ messageId: record.messageId }, 'record processed');
+        }
       } catch (error) {
+        if (error instanceof ValidationError) {
+          log.warn(
+            { messageId: record.messageId, error: error.message, permanent: true },
+            'record rejected: invalid input',
+          );
+
+          return;
+        }
+
+        if (isTransientError(error)) {
+          log.warn(
+            { messageId: record.messageId, error: formatErrorMessage(error), transient: true },
+            'record failed: transient error, will retry',
+          );
+          batchItemFailures.push({ itemIdentifier: record.messageId });
+
+          return;
+        }
+
         log.error(
-          {
-            messageId: record.messageId,
-            error: formatErrorMessage(error),
-          },
-          'record failed',
+          { messageId: record.messageId, error: formatErrorMessage(error), permanent: true },
+          'record failed: permanent error',
         );
-        batchItemFailures.push({ itemIdentifier: record.messageId });
       }
     }),
   );

@@ -290,6 +290,7 @@ describe('metric-query-handler', () => {
       // Assert
       expect(result).toHaveProperty('error.code', 'VALIDATION_ERROR');
       expect(result).toHaveProperty('error.message', expect.stringContaining('metricId'));
+      expect(result).toHaveProperty('error.requestId', 'local');
     });
 
     it('should return error for invalid date format', async () => {
@@ -401,6 +402,49 @@ describe('metric-query-handler', () => {
 
       // Assert
       expect(result).toHaveProperty('count', count1 + count2 + count3);
+    });
+
+    it('should use daily rollups for full middle days in a mixed range', async () => {
+      // Arrange
+      const workspaceId = faker.string.alphanumeric(8);
+      const metricId = faker.string.alphanumeric(10);
+
+      await writeMetric({ workspaceId, metricId, date: '2024-03-10T14', count: 10 });
+      await writeMetric({ workspaceId, metricId, date: '2024-03-11T08', count: 20 });
+      await writeMetric({ workspaceId, metricId, date: '2024-03-12T16', count: 30 });
+      await writeMetric({ workspaceId, metricId, date: '2024-03-13T22', count: 40 });
+      await writeMetric({ workspaceId, metricId, date: '2024-03-14T05', count: 50 });
+
+      // Act
+      const result = await queryHandler({
+        workspaceId,
+        metricId,
+        fromDate: '2024-03-10T14',
+        toDate: '2024-03-14T05',
+      });
+
+      // Assert
+      expect(result).toHaveProperty('count', 150);
+    });
+
+    it('should return correct count for adjacent-day partial range', async () => {
+      // Arrange
+      const workspaceId = faker.string.alphanumeric(8);
+      const metricId = faker.string.alphanumeric(10);
+
+      await writeMetric({ workspaceId, metricId, date: '2024-03-10T18', count: 5 });
+      await writeMetric({ workspaceId, metricId, date: '2024-03-11T06', count: 15 });
+
+      // Act
+      const result = await queryHandler({
+        workspaceId,
+        metricId,
+        fromDate: '2024-03-10T15',
+        toDate: '2024-03-11T10',
+      });
+
+      // Assert
+      expect(result).toHaveProperty('count', 20);
     });
   });
 });
