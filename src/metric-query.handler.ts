@@ -14,8 +14,11 @@ export const main = async (
 ): Promise<MetricQueryResponse | MetricQueryErrorResponse> => {
   const log = logger.child({ requestId: context?.awsRequestId ?? 'local' });
 
+  let validated: ReturnType<typeof validateQueryRequest> | undefined;
+
   try {
-    const validated = validateQueryRequest(request);
+    validated = validateQueryRequest(request);
+
     const count = await metricRepository.queryMetricCount(validated);
 
     log.info({ metricId: validated.metricId, count }, 'query completed');
@@ -25,10 +28,21 @@ export const main = async (
     if (error instanceof ValidationError) {
       log.warn({ error: error.message }, 'validation failed');
 
-      return { error: { code: 'VALIDATION_ERROR', message: error.message } };
+      const requestId = context?.awsRequestId ?? 'local';
+
+      return { error: { code: 'VALIDATION_ERROR', message: error.message, requestId } };
     }
 
-    log.error({ error: formatErrorMessage(error) }, 'query failed');
+    log.error(
+      {
+        error: formatErrorMessage(error),
+        metricId: validated?.metricId,
+        workspaceId: validated?.workspaceId,
+        fromDate: validated?.fromDate,
+        toDate: validated?.toDate,
+      },
+      'query failed',
+    );
     throw error;
   }
 };

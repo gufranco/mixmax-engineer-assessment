@@ -71,6 +71,10 @@ Parameters:
       - warn
       - error
     Description: Minimum log level for Lambda functions
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    Description: CloudWatch log group retention in days
 
 Globals:
   Function:
@@ -78,6 +82,8 @@ Globals:
     Timeout: !Ref LambdaTimeout
     MemorySize: !Ref LambdaMemorySize
     Tracing: Active
+    Layers:
+      - !Sub arn:aws:lambda:${AWS::Region}:580247275435:layer:LambdaInsightsExtension:53
     Environment:
       Variables:
         ENV: !Ref Env
@@ -98,6 +104,7 @@ Resources:
               Action:
                 - dynamodb:Query
               Resource: !GetAtt UsageTable.Arn
+        - arn:aws:iam::aws:policy/CloudWatchLambdaInsightsExecutionRolePolicy
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -126,7 +133,9 @@ Resources:
             - Effect: Allow
               Action:
                 - dynamodb:UpdateItem
+                - dynamodb:PutItem
               Resource: !GetAtt UsageTable.Arn
+        - arn:aws:iam::aws:policy/CloudWatchLambdaInsightsExecutionRolePolicy
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -135,6 +144,18 @@ Resources:
         Sourcemap: true
         EntryPoints:
           - src/metric-updates.handler.ts
+
+  QueryHandlerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${MetricQueryHandler}
+      RetentionInDays: !Ref LogRetentionDays
+
+  UpdatesHandlerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${MetricUpdatesHandler}
+      RetentionInDays: !Ref LogRetentionDays
 
   UsageTable:
     Type: AWS::DynamoDB::Table
@@ -234,6 +255,26 @@ Resources:
       Period: !Ref ErrorAlarmPeriod
       EvaluationPeriods: !Ref ErrorAlarmEvaluationPeriods
       Threshold: !Ref ErrorAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+      OKActions:
+        - !Ref AlarmNotificationTopic
+
+  QueryHandlerThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Query handler is being throttled due to reserved concurrency exhaustion
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MetricQueryHandler
+      Statistic: Sum
+      Period: !Ref ErrorAlarmPeriod
+      EvaluationPeriods: !Ref ErrorAlarmEvaluationPeriods
+      Threshold: 0
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions:

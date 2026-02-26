@@ -30,6 +30,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.600.0",
+    "@smithy/node-http-handler": "^4.4.12",
     "pino": "^10.3.1",
     "zod": "^4.3.6"
   },
