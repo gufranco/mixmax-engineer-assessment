@@ -36,9 +36,15 @@ export const main = async (
         const deduplicated = await metricRepository.incrementMetric(message, record.messageId);
 
         if (deduplicated) {
-          log.debug({ messageId: record.messageId }, 'duplicate message skipped');
+          log.debug(
+            { messageId: record.messageId, workspaceId: message.workspaceId },
+            'duplicate message skipped',
+          );
         } else {
-          log.info({ messageId: record.messageId }, 'record processed');
+          log.info(
+            { messageId: record.messageId, workspaceId: message.workspaceId },
+            'record processed',
+          );
         }
       } catch (error) {
         if (error instanceof ValidationError) {
