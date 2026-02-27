@@ -535,7 +535,7 @@ GitHub Actions runs on every push and PR to `main`:
 
 ```
 lint-and-typecheck ──┐
-unit-tests ──────────┼── build ── validate
+unit-tests ──────────┼── build ── validate ── deploy-staging ── deploy-production
 integration-tests ───┘
 ```
 
@@ -552,6 +552,13 @@ integration-tests ───┘
 **Validate** (after build passes):
 
 - **validate**: Runs `sam validate --lint` to verify the CloudFormation template is syntactically correct and follows SAM best practices. Full stack deployment to LocalStack is available locally via `pnpm deploy:local`.
+
+**Deploy** (main branch only, after validate passes):
+
+- **deploy-staging**: Downloads the build artifact and deploys to the staging environment via `sam deploy`. Uses OIDC role assumption for credentials, no long-lived secrets. Runs automatically on every push to `main`.
+- **deploy-production**: Downloads the same build artifact and deploys to production. Gated by a GitHub Environment protection rule that requires manual approval before proceeding. The same artifact built once in the build step is promoted through both environments.
+
+Both deploy stages use `vars.AWS_DEPLOY_ROLE` configured per GitHub Environment, allowing different IAM roles (and AWS accounts) for staging and production. The canary deployment preference in the SAM template shifts 10% of traffic to the new version and rolls back automatically if error or throttle alarms fire within 5 minutes.
 
 Locally, Husky pre-commit hooks run lint-staged (ESLint + Prettier on staged files) and `pnpm typecheck`. Pre-push hooks run the full suite: lint, format check, typecheck, and all tests.
 
