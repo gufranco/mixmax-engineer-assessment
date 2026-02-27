@@ -21,7 +21,7 @@
     "localstack:down": "docker compose down",
     "localstack:logs": "docker compose logs -f localstack",
     "deploy:local": "./scripts/deploy-local.sh",
-    "prepare": "husky"
+    "prepare": "husky || true"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
