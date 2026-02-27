@@ -98,6 +98,12 @@ Resources:
     Properties:
       Handler: src/metric-query.handler.main
       CodeUri: .
+      AutoPublishAlias: live
+      DeploymentPreference:
+        Type: Canary10Percent5Minutes
+        Alarms:
+          - !Ref QueryHandlerErrorAlarm
+          - !Ref QueryHandlerThrottleAlarm
       ReservedConcurrentExecutions: !Ref QueryReservedConcurrency
       Policies:
         - Statement:
@@ -120,6 +126,12 @@ Resources:
     Properties:
       Handler: src/metric-updates.handler.main
       CodeUri: .
+      AutoPublishAlias: live
+      DeploymentPreference:
+        Type: Canary10Percent5Minutes
+        Alarms:
+          - !Ref UpdatesHandlerErrorAlarm
+          - !Ref DLQDepthAlarm
       ReservedConcurrentExecutions: !Ref ReservedConcurrency
       Events:
         SQSEvent:
