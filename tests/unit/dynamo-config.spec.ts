@@ -117,35 +117,51 @@ describe('calculateTtl', () => {
     }
   });
 
-  it('should return epoch seconds using configured TTL_DAYS', () => {
+  it('should return exact epoch seconds for a fixed clock', () => {
     // Arrange
     const days = faker.number.int({ min: 1, max: 365 });
 
     process.env['TTL_DAYS'] = String(days);
 
-    const now = Math.floor(Date.now() / 1000);
-    const expectedSeconds = days * 24 * 60 * 60;
+    const fixedNowMs = 1_700_000_000_000;
+    const expectedTtl = 1_700_000_000 + days * 24 * 60 * 60;
 
     // Act
-    const ttl = calculateTtl();
+    const ttl = calculateTtl(fixedNowMs);
 
     // Assert
-    expect(ttl).toBeGreaterThan(now + expectedSeconds - 10);
-    expect(ttl).toBeLessThan(now + expectedSeconds + 10);
+    expect(ttl).toBe(expectedTtl);
   });
 
   it('should default to 90 days when TTL_DAYS is not set', () => {
     // Arrange
     delete process.env['TTL_DAYS'];
 
-    const now = Math.floor(Date.now() / 1000);
+    const fixedNowMs = 1_700_000_000_000;
     const ninetyDaysInSeconds = 90 * 24 * 60 * 60;
+    const expectedTtl = 1_700_000_000 + ninetyDaysInSeconds;
+
+    // Act
+    const ttl = calculateTtl(fixedNowMs);
+
+    // Assert
+    expect(ttl).toBe(expectedTtl);
+  });
+
+  it('should use Date.now() when no argument is provided', () => {
+    // Arrange
+    delete process.env['TTL_DAYS'];
+
+    const before = Math.floor(Date.now() / 1000);
 
     // Act
     const ttl = calculateTtl();
 
     // Assert
-    expect(ttl).toBeGreaterThan(now + ninetyDaysInSeconds - 10);
-    expect(ttl).toBeLessThan(now + ninetyDaysInSeconds + 10);
+    const after = Math.floor(Date.now() / 1000);
+    const ninetyDays = 90 * 24 * 60 * 60;
+
+    expect(ttl).toBeGreaterThanOrEqual(before + ninetyDays);
+    expect(ttl).toBeLessThanOrEqual(after + ninetyDays);
   });
 });

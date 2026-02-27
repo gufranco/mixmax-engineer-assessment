@@ -48,8 +48,12 @@ function buildUpdateTransactItem(params: UpdateParams): TransactWriteItem {
   };
 }
 
-function buildDeduplicationItem(tableName: string, messageId: string): TransactWriteItem {
-  const ttl = Math.floor(Date.now() / 1000) + DEDUP_TTL_SECONDS;
+function buildDeduplicationItem(
+  tableName: string,
+  messageId: string,
+  nowMs: number,
+): TransactWriteItem {
+  const ttl = Math.floor(nowMs / 1000) + DEDUP_TTL_SECONDS;
 
   return {
     Put: {
@@ -74,15 +78,18 @@ function isDuplicateMessage(error: unknown): boolean {
 
 class DynamoMetricRepository {
   async incrementMetric(message: MetricUpdateMessage, messageId: string): Promise<boolean> {
+    const nowMs = Date.now();
     const tableName = getTableName();
-    const ttl = calculateTtl();
+    const ttl = calculateTtl(nowMs);
 
     const partitions = [
       { type: 'workspace' as const, id: message.workspaceId },
       ...(message.userId ? [{ type: 'user' as const, id: message.userId }] : []),
     ];
 
-    const transactItems: TransactWriteItem[] = [buildDeduplicationItem(tableName, messageId)];
+    const transactItems: TransactWriteItem[] = [
+      buildDeduplicationItem(tableName, messageId, nowMs),
+    ];
 
     for (const { type, id } of partitions) {
       const pk = buildPartitionKey(type, id, message.metricId);
