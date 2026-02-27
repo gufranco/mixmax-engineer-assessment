@@ -16,9 +16,9 @@ Direct invoke ────► │  Query Handler  │ ────────�
                     └─────────────────┘
 ```
 
-The **Updates Handler** processes SQS messages containing metric updates and writes both hourly and daily counters to DynamoDB. For each message, it writes workspace-level metrics and optionally user-level metrics.
+The **Updates Handler** processes SQS messages containing metric increments and writes both hourly and daily counters to DynamoDB. Each message is processed as a single `TransactWriteItems` call that atomically writes the counter updates alongside a deduplication record, preventing double-counting on SQS redelivery.
 
-The **Query Handler** is invoked directly to query usage metrics from DynamoDB. When the date range covers full days (e.g. `T00` to `T23`), it reads daily rollup keys instead of hourly keys, reducing DynamoDB reads by up to 24x. For partial-day ranges, it falls back to hourly keys and aggregates the counters.
+The **Query Handler** is invoked directly to query usage metrics. It splits date ranges into optimal segments: full days use daily rollup keys, while partial days at the edges use hourly keys. A query from `2024-01-15T05` to `2024-01-20T18` issues 3 parallel queries: hourly keys for the 15th from T05, daily rollups for the 16th through 19th, and hourly keys for the 20th through T18. This reduces DynamoDB reads by up to 24x on the full-day portion.
 
 Both handlers share a single DynamoDB table using a composite key design with `pk` (partition key) and `sk` (sort key). A single table keeps all access patterns co-located under one billing unit and avoids cross-table coordination.
 
@@ -26,9 +26,11 @@ Both handlers share a single DynamoDB table using a composite key design with `p
 
 Counter increments are commutative: `ADD 5` followed by `ADD 3` produces the same result as `ADD 3` followed by `ADD 5`. Message ordering is irrelevant, so FIFO's ordering guarantee adds no value. FIFO's deduplication window is only 5 minutes, too short for real protection during DLQ replay or operational incidents. Standard SQS has nearly unlimited throughput with no configuration, while FIFO caps at 300 msg/s per message group without batching, exactly at this system's target.
 
-### At-least-once counting
+### Idempotent, atomic writes
 
-DynamoDB's `ADD` operation is commutative but not idempotent. If a partial failure causes SQS to retry a message, counters that already succeeded on the first attempt get incremented again. For aggregate usage metrics, the difference between 10,000 and 10,001 is not meaningful. Making writes atomic with `TransactWriteItems` would double the write capacity cost for a guarantee the use case doesn't need.
+Each SQS message is processed using `TransactWriteItems`. The transaction includes a deduplication record keyed by the SQS `messageId` with an `attribute_not_exists(pk)` condition, alongside the hourly and daily counter updates. If SQS redelivers a message, the condition check fails and the entire transaction is cancelled, preventing double-counting.
+
+This costs 2x the write capacity compared to individual `UpdateItem` calls. Data integrity matters more than write cost savings, and PAY_PER_REQUEST billing absorbs the overhead without provisioning changes. Dedup records auto-expire after 24 hours via DynamoDB TTL, which exceeds `maxReceiveCount * VisibilityTimeout` (3 * 60s = 180s) by a wide margin.
 
 ## Project Structure
 
@@ -38,8 +40,7 @@ src/
   errors/           # ValidationError class, error formatting utility
   infrastructure/   # DynamoDB client, repository, key builders, TTL, query granularity
   logging/          # Pino structured logger
-  schemas/          # Zod schemas, regex patterns, identifier constraints
-  types/            # TypeScript interfaces derived from schemas
+  schemas/          # Zod schemas and regex patterns (types derived via z.infer)
   validators/       # Validation functions wrapping Zod schemas
   metric-query.handler.ts      # Lambda entry point: queries
   metric-updates.handler.ts    # Lambda entry point: updates
@@ -47,7 +48,7 @@ src/
 
 Files use a `name.type.ts` naming convention: `partition-key.builder.ts`, `query-request.schema.ts`, `validation.error.ts`. The suffix tells you what a file contains before you open it.
 
-Handlers are thin orchestrators that call validators and the repository. The repository implements `MetricRepository` interface using DynamoDB, but the handlers never import DynamoDB types or construct keys. This dependency inversion means the storage layer can be swapped or tested independently.
+Handlers are thin orchestrators that call validators and the repository. The repository encapsulates all DynamoDB operations, key construction, and deduplication logic. Handlers never import DynamoDB types or construct keys.
 
 ## Lambda 1: metric-query-handler
 
@@ -73,16 +74,19 @@ A directly-invoked Lambda that queries usage metrics. It accepts a request with 
 | `fromDate` | Yes | `YYYY-MM-DDThh` | Start of date range (hourly precision) |
 | `toDate` | Yes | `YYYY-MM-DDThh` | End of date range (hourly precision). Max 1825 days from `fromDate` |
 
-Validation errors return a structured response instead of throwing:
+Errors return structured responses instead of throwing:
 
 ```json
 {
   "error": {
     "code": "VALIDATION_ERROR",
-    "message": "metricId is required and must be a non-empty string"
+    "message": "metricId is required and must be a non-empty string",
+    "requestId": "abc-123-def"
   }
 }
 ```
+
+Error codes: `VALIDATION_ERROR` for invalid input, `TRANSIENT_ERROR` for retryable failures (includes `retryable: true`), `INTERNAL_ERROR` for permanent failures.
 
 ## Lambda 2: metric-updates-handler
 
@@ -102,6 +106,7 @@ An SQS-triggered Lambda that processes usage tracking events. Each message repre
 
 | Field | Required | Format | Notes |
 |---|---|---|---|
+| `schemaVersion` | No | number | Defaults to `1`. Enables safe schema evolution during rolling deployments. Unsupported versions are rejected before validation |
 | `workspaceId` | Yes | string | Workspace identifier. Always writes a `WSP#` entry. Alphanumeric, hyphens, and underscores only. Max 128 characters |
 | `userId` | No | string | User identifier. If provided, also writes a `USR#` entry. Same format constraints as above |
 | `metricId` | Yes | string | The metric name (e.g. `"emails-sent"`). Same format constraints as above |
@@ -118,10 +123,9 @@ Single table design with composite key (`pk`, `sk`). Partition keys use `#` as a
 | User daily metric | `USR#{userId}#MET#{metricId}` | `D#YYYY-MM-DD` |
 | Workspace hourly metric | `WSP#{workspaceId}#MET#{metricId}` | `H#YYYY-MM-DDThh` |
 | Workspace daily metric | `WSP#{workspaceId}#MET#{metricId}` | `D#YYYY-MM-DD` |
+| Dedup record | `DEDUP#{messageId}` | `DEDUP#{messageId}` |
 
-Each item also contains:
-- `count` (N): the accumulated metric count
-- `ttl` (N): epoch seconds for automatic expiration, refreshed on every write so actively used metrics stay alive while stale data expires (90 days default, configurable per environment)
+Each metric item contains `count` (accumulated value) and `ttl` (epoch seconds, refreshed on every write so active metrics stay alive while stale data expires, 90 days default). Dedup records contain only `ttl` and auto-expire after 24 hours.
 
 ## Design Decisions
 
@@ -129,21 +133,31 @@ Each item also contains:
 
 Zod schemas are the single source of truth for both runtime validation and compile-time types. TypeScript types are derived via `z.infer<typeof schema>`, which eliminates drift between what the validator accepts and what the code expects. There is zero `any` in production code. Validation goes beyond format: date fields are checked against the calendar (e.g. `2024-02-31` is rejected even though it matches the regex), count must be a positive integer, and all identifiers are validated against `/^[a-zA-Z0-9_-]+$/` to prevent `#` injection into DynamoDB keys. The query handler returns validation errors as structured data (`{ error: { code, message } }`) so callers can distinguish "fix your input" from "retry later," and CloudWatch error metrics only reflect real system failures.
 
-### Error handling
+### Error classification
 
-The updates handler processes each SQS record independently with its own try/catch. Within a record, all DynamoDB writes fire in parallel via `Promise.all`. If any write fails, the entire record is reported in `batchItemFailures` and only that record is retried by SQS. Records that succeed are not retried, preventing unnecessary double-counting. After 3 failed attempts, messages move to a dead letter queue. A CloudWatch alarm fires when any message arrives in the DLQ, and `scripts/replay-dlq.sh` replays messages back to the main queue after the root cause is fixed.
+The updates handler processes all records in a batch concurrently via `Promise.allSettled`, each with its own try/catch. Every error is classified before deciding what to do:
+
+- **Permanent** (malformed JSON, validation failures, `AccessDeniedException`, `ResourceNotFoundException`): acknowledged and dropped. Retrying would produce the same result. These never reach the DLQ.
+- **Transient** (DynamoDB throttling, timeouts, service unavailable, transaction conflicts): returned in `batchItemFailures` so SQS retries. After `maxReceiveCount` attempts, moves to the DLQ.
+- **Unclassified**: defaults to transient. Safer for data integrity: if genuinely transient, the retry succeeds. If permanent, it exhausts retries and lands in the DLQ for investigation.
+
+The DLQ contains only repeated transient or unclassified failures, making it a reliable signal for infrastructure issues. `scripts/replay-dlq.sh` replays messages back to the main queue after the root cause is fixed.
 
 ### Observability
 
-Pino produces structured JSON logs with a `requestId` field (the Lambda `awsRequestId`) on every log line, making CloudWatch Logs Insights queries straightforward. Error logs preserve the full stack trace via `error.stack`, so root cause analysis doesn't require reproducing the failure. AWS X-Ray is active on both handlers, so the full request path, from Lambda cold start through DynamoDB query latency, is visible in trace waterfalls without manual instrumentation. CloudWatch error alarms on both handlers are wired to an SNS topic for notifications. Log level is configurable per environment via a SAM parameter.
+Pino produces structured JSON logs with `service` and `requestId` fields on every line, making CloudWatch Logs Insights queries straightforward. Error logs preserve the full stack trace via `error.stack`, so root cause analysis doesn't require reproducing the failure. AWS X-Ray is active on both handlers for distributed request tracing. Lambda Insights provides memory usage, cold start duration, and CPU metrics via the managed extension layer. CloudWatch alarms cover updates handler errors, query handler errors, query handler throttles, and DLQ depth, all wired to an SNS topic. Log retention is configurable per environment (default 30 days). Log level is configurable via a SAM parameter.
+
+### Connection management
+
+The DynamoDB client uses explicit timeouts via `NodeHttpHandler`: 3 seconds for connection and 5 seconds for request. Without these, a hanging DynamoDB call would consume the full 30-second Lambda timeout, wasting concurrency slots and delaying error detection.
 
 ### Testing
 
-Zero mocks. Unit tests validate pure functions like validation, key building, date granularity logic, and config readers. Integration tests run handlers against real DynamoDB on LocalStack. SQS events are constructed in-memory using a `buildSqsEvent` helper that produces realistic `SQSEvent` objects, keeping the test focused on handler logic and DynamoDB behavior rather than testing the SQS transport layer. All tests follow the Arrange-Act-Assert pattern with explicit comments. 96 tests total, 68 unit and 28 integration.
+Zero mocks. Unit tests validate pure functions: validation, key building, query segmentation, error classification, and config readers. Integration tests run handlers against real DynamoDB on LocalStack, including deduplication verification and mixed-range query optimization. SQS events are constructed in-memory using a `buildSqsEvent` helper. All tests follow the Arrange-Act-Assert pattern with explicit comments. 128 tests total, 95 unit and 33 integration.
 
 ### Security
 
-All identifier fields validate against a shared regex allowlist (`/^[a-zA-Z0-9_-]+$/`, max 128 characters) to prevent `#` injection into DynamoDB partition keys. The `count` field must be a positive integer capped at 1,000,000 to prevent a single message from inflating metrics by an arbitrary amount. IAM policies follow least privilege: the query handler has `dynamodb:Query` only, the updates handler has `dynamodb:UpdateItem` only, both scoped to the specific table ARN. SQS queues use server-side encryption at rest.
+All identifier fields validate against a shared regex allowlist (`/^[a-zA-Z0-9_-]+$/`, max 128 characters) to prevent `#` injection into DynamoDB partition keys. The `count` field must be a positive integer capped at 1,000,000 to prevent a single message from inflating metrics by an arbitrary amount. IAM policies follow least privilege: the query handler has `dynamodb:Query` only, the updates handler has `dynamodb:UpdateItem` and `dynamodb:PutItem` only, both scoped to the specific table ARN. SQS queues use server-side encryption at rest.
 
 ## Prerequisites
 
@@ -291,7 +305,7 @@ pnpm test:all
 
 ## Infrastructure
 
-The SAM template (`template.yaml`) is fully parameterized with 15 parameters, each with a sensible default. A bare `sam deploy` works out of the box. Operators can tune per environment without touching code:
+The SAM template (`template.yaml`) is fully parameterized with 16 parameters, each with a sensible default. A bare `sam deploy` works out of the box. Operators can tune per environment without touching code:
 
 ```bash
 sam deploy --parameter-overrides Env=production TtlDays=180 ReservedConcurrency=50
@@ -301,7 +315,7 @@ sam deploy --parameter-overrides Env=production TtlDays=180 ReservedConcurrency=
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `Env` | `local` | Environment name. Controls table and queue names. Allowed: `local`, `staging`, `production` |
+| `Env` | `local` | Environment name. Controls queue names and resource naming. Allowed: `local`, `staging`, `production` |
 | `TtlDays` | `90` | Days before DynamoDB items expire via TTL. Also available as `TTL_DAYS` env var |
 | `MaxDateRangeDays` | `1825` | Maximum date range for metric queries. Also available as `MAX_DATE_RANGE_DAYS` env var |
 
@@ -314,6 +328,7 @@ sam deploy --parameter-overrides Env=production TtlDays=180 ReservedConcurrency=
 | `ReservedConcurrency` | `10` | Max concurrent executions for the updates handler |
 | `QueryReservedConcurrency` | `10` | Max concurrent executions for the query handler |
 | `LogLevel` | `info` | Minimum log level for Lambda functions. Allowed: `debug`, `info`, `warn`, `error` |
+| `LogRetentionDays` | `30` | CloudWatch log group retention in days |
 
 ### SQS parameters
 
@@ -338,12 +353,15 @@ The DLQ depth alarm is not parameterized: it fires on any message in the DLQ, wh
 
 - **DynamoDB table**: PAY_PER_REQUEST billing, TTL enabled, Point-in-Time Recovery for continuous backups, `DeletionPolicy: Retain` to prevent accidental deletion via CloudFormation.
 - **SQS queue**: Wired to a dead letter queue via RedrivePolicy. Server-side encryption enabled.
-- **Dead letter queue**: Holds messages that failed all retry attempts. Server-side encryption enabled.
-- **CloudWatch alarms**: DLQ depth alarm, updates handler error alarm, and query handler error alarm, all wired to an SNS notification topic.
+- **Dead letter queue**: 14-day retention. Server-side encryption enabled.
+- **CloudWatch alarms**: DLQ depth, updates handler errors, query handler errors, query handler throttles, all wired to an SNS notification topic.
 - **SNS topic**: Subscribe an email, Slack webhook, or PagerDuty endpoint to receive alarm notifications.
 - **X-Ray tracing**: Active on both handlers for distributed request tracing.
-- **IAM least-privilege**: Query handler has `dynamodb:Query` only. Updates handler has `dynamodb:UpdateItem` only.
+- **Lambda Insights**: Memory, cold starts, and CPU metrics via managed extension layer.
+- **CloudWatch log groups**: Configurable retention (default 30 days).
+- **IAM least-privilege**: Query handler has `dynamodb:Query` only. Updates handler has `dynamodb:UpdateItem` and `dynamodb:PutItem` only. Both scoped to the specific table ARN.
 - **Batch failure reporting**: `ReportBatchItemFailures` enabled so only failed records are retried, not the entire batch.
+- **Progressive deployment**: Both Lambda functions use `Canary10Percent5Minutes` deployment preference. On deploy, 10% of traffic shifts to the new version. If the error or throttle alarms fire within 5 minutes, CodeDeploy automatically rolls back to the previous version. The remaining 90% shifts only after the canary period passes without alarms.
 
 ## Error Handling
 
@@ -355,7 +373,7 @@ The updates handler uses **partial batch failure reporting**. When processing a 
 4. After 3 failed attempts (maxReceiveCount), messages move to the dead letter queue.
 5. The DLQ depth alarm fires when any messages arrive in the DLQ.
 
-The query handler validates all input before querying DynamoDB. Invalid requests return a structured error response with a `VALIDATION_ERROR` code and a descriptive message. System errors (DynamoDB failures, unexpected exceptions) still throw, causing Lambda to report the invocation as failed.
+The query handler validates all input before querying DynamoDB. Invalid requests return a structured error response with a `VALIDATION_ERROR` code. System errors are classified using the same transient/permanent logic: transient failures return `TRANSIENT_ERROR` with `retryable: true`, permanent failures return `INTERNAL_ERROR`. The handler never throws, so callers always receive a structured response.
 
 All log lines include a `requestId` field (the Lambda `awsRequestId`) for correlating logs from the same invocation in CloudWatch Logs Insights.
 
@@ -449,7 +467,7 @@ aws sqs purge-queue --queue-url <DLQ_URL>
 ```bash
 aws logs filter-log-events \
   --log-group-name /aws/lambda/<FUNCTION_NAME> \
-  --filter-pattern '"query failed" OR "record failed" OR "batch partially failed"' \
+  --filter-pattern '"query failed" OR "record failed" OR "record rejected" OR "batch partially failed"' \
   --start-time <EPOCH_MS>
 ```
 
@@ -479,6 +497,20 @@ aws cloudwatch get-metric-statistics \
 
 PAY_PER_REQUEST auto-scales, but sustained traffic above 40,000 WCU may require pre-provisioned capacity.
 
+#### Noisy Tenant Detection
+
+If DynamoDB throttling or high Lambda error rates occur, a single workspace may be generating disproportionate traffic. Use CloudWatch Logs Insights to identify high-volume workspaces:
+
+```
+fields @timestamp, workspaceId
+| filter @message like /record processed/
+| stats count(*) as messages by workspaceId
+| sort messages desc
+| limit 20
+```
+
+This service does not enforce per-tenant rate limits. It processes whatever SQS delivers. Rate limiting belongs upstream, at the API gateway or producer level, where the caller's identity and quota can be checked before a message reaches the queue. If a workspace exceeds acceptable volume, the producer should reject or throttle at the ingestion point rather than dropping messages silently after they're queued.
+
 #### Useful Commands
 
 ```bash
@@ -501,9 +533,28 @@ aws xray get-trace-summaries \
 
 GitHub Actions runs on every push and PR to `main`:
 
+```
+lint-and-typecheck ──┐
+unit-tests ──────────┼── build ── deploy-staging ── deploy-production
+integration-tests ───┘
+```
+
+**Validation** (every push and PR):
+
 - **lint-and-typecheck**: ESLint + `pnpm typecheck` (strict `tsc --noEmit`)
-- **unit-tests**: Pure function tests, no external deps
+- **unit-tests**: Pure function tests with coverage, no external deps
 - **integration-tests**: Starts LocalStack as a service container, initializes DynamoDB, and runs handler tests against real DynamoDB
+
+**Build** (after all validation passes):
+
+- **build**: Runs `sam build`, uploads the build artifact tagged with the git SHA. The same artifact is promoted through staging and production, never rebuilt.
+
+**Deployment** (main branch pushes only):
+
+- **deploy-staging**: Downloads the build artifact and deploys to the staging stack via `sam deploy`. Uses GitHub environment protection rules and OIDC-based AWS credentials (no static keys).
+- **deploy-production**: Requires manual approval via GitHub environment protection rules. Deploys the same artifact that passed staging. Canary deployment shifts 10% of traffic for 5 minutes, rolling back automatically if alarms fire.
+
+Deployment jobs use `aws-actions/configure-aws-credentials` with OIDC (`id-token: write` permission). Each environment needs `AWS_DEPLOY_ROLE_ARN` and `AWS_REGION` configured as GitHub environment variables.
 
 Locally, Husky pre-commit hooks run lint-staged (ESLint + Prettier on staged files) and `pnpm typecheck`. Pre-push hooks run the full suite: lint, format check, typecheck, and all tests.
 
