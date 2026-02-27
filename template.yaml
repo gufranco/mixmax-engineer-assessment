@@ -76,6 +76,10 @@ Parameters:
     Default: 30
     Description: CloudWatch log group retention in days
 
+Conditions:
+  EnableCanaryDeploy:
+    !Not [!Equals [!Ref Env, local]]
+
 Globals:
   Function:
     Runtime: nodejs22.x
@@ -100,6 +104,7 @@ Resources:
       CodeUri: .
       AutoPublishAlias: live
       DeploymentPreference:
+        Enabled: !If [EnableCanaryDeploy, true, false]
         Type: Canary10Percent5Minutes
         Alarms:
           - !Ref QueryHandlerErrorAlarm
@@ -128,6 +133,7 @@ Resources:
       CodeUri: .
       AutoPublishAlias: live
       DeploymentPreference:
+        Enabled: !If [EnableCanaryDeploy, true, false]
         Type: Canary10Percent5Minutes
         Alarms:
           - !Ref UpdatesHandlerErrorAlarm

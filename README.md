@@ -361,7 +361,7 @@ The DLQ depth alarm is not parameterized: it fires on any message in the DLQ, wh
 - **CloudWatch log groups**: Configurable retention (default 30 days).
 - **IAM least-privilege**: Query handler has `dynamodb:Query` only. Updates handler has `dynamodb:UpdateItem` and `dynamodb:PutItem` only. Both scoped to the specific table ARN.
 - **Batch failure reporting**: `ReportBatchItemFailures` enabled so only failed records are retried, not the entire batch.
-- **Progressive deployment**: Both Lambda functions use `Canary10Percent5Minutes` deployment preference. On deploy, 10% of traffic shifts to the new version. If the error or throttle alarms fire within 5 minutes, CodeDeploy automatically rolls back to the previous version. The remaining 90% shifts only after the canary period passes without alarms.
+- **Progressive deployment**: Both Lambda functions use `Canary10Percent5Minutes` deployment preference in staging and production. On deploy, 10% of traffic shifts to the new version. If the error or throttle alarms fire within 5 minutes, CodeDeploy automatically rolls back to the previous version. The remaining 90% shifts only after the canary period passes without alarms. Canary deployment is disabled for `Env=local` because LocalStack's community edition does not support CodeDeploy.
 
 ## Error Handling
 
