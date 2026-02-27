@@ -381,6 +381,24 @@ describe('validateUpdateMessage', () => {
     );
   });
 
+  it('should throw when schemaVersion is unsupported', () => {
+    // Act & Assert
+    expect(() => validateUpdateMessage({ ...fakeValidUpdateMessage(), schemaVersion: 2 })).toThrow(
+      'unsupported schema version: 2',
+    );
+  });
+
+  it('should accept messages with explicit schemaVersion 1', () => {
+    // Arrange
+    const message = { ...fakeValidUpdateMessage(), schemaVersion: 1 };
+
+    // Act
+    const result = validateUpdateMessage(message);
+
+    // Assert
+    expect(result.schemaVersion).toBe(1);
+  });
+
   it('should accept count at exactly the maximum', () => {
     // Arrange
     const message = { ...fakeValidUpdateMessage(), count: 1_000_000 };
