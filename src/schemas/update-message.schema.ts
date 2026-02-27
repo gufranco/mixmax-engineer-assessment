@@ -42,3 +42,5 @@ export const metricUpdateMessageSchema = z.object({
     )
     .optional(),
 });
+
+export type MetricUpdateMessage = z.infer<typeof metricUpdateMessageSchema>;

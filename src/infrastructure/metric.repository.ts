@@ -5,9 +5,8 @@ import {
 } from '@aws-sdk/client-dynamodb';
 
 import type { TransactWriteItem } from '@aws-sdk/client-dynamodb';
-import type { MetricQueryRequest } from '../types/metric-query-request.type';
-import type { MetricRepository } from '../types/metric-repository.interface';
-import type { MetricUpdateMessage } from '../types/metric-update-message.type';
+import type { MetricQueryRequest } from '../schemas/query-request.schema';
+import type { MetricUpdateMessage } from '../schemas/update-message.schema';
 import type { QuerySegment } from './query-granularity.util';
 import { buildPartitionKey } from './partition-key.builder';
 import { buildSortKey } from './sort-key.builder';
@@ -73,7 +72,7 @@ function isDuplicateMessage(error: unknown): boolean {
   return error.CancellationReasons?.[0]?.Code === 'ConditionalCheckFailed';
 }
 
-class DynamoMetricRepository implements MetricRepository {
+class DynamoMetricRepository {
   async incrementMetric(message: MetricUpdateMessage, messageId: string): Promise<boolean> {
     const tableName = getTableName();
     const ttl = calculateTtl();
@@ -174,4 +173,4 @@ class DynamoMetricRepository implements MetricRepository {
   }
 }
 
-export const metricRepository: MetricRepository = new DynamoMetricRepository();
+export const metricRepository = new DynamoMetricRepository();
