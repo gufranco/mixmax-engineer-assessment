@@ -1,9 +1,10 @@
 import type { Context } from 'aws-lambda';
 
-import type { MetricQueryResponse } from './types/metric-query-response.type';
-import type { MetricQueryErrorResponse } from './types/metric-query-error-response.type';
+import type { MetricQueryResponse } from './schemas/query-response.schema';
+import type { MetricQueryErrorResponse } from './schemas/query-error-response.schema';
 import { validateQueryRequest } from './validators/query-request.validator';
 import { ValidationError } from './errors/validation.error';
+import { isTransientError } from './infrastructure/error-classifier.util';
 import { metricRepository } from './infrastructure/metric.repository';
 import { formatErrorMessage } from './errors/format-error-message.util';
 import { logger } from './logging/logger';
@@ -25,17 +26,20 @@ export const main = async (
 
     return { ...validated, count };
   } catch (error) {
+    const requestId = context?.awsRequestId ?? 'local';
+
     if (error instanceof ValidationError) {
       log.warn({ error: error.message }, 'validation failed');
-
-      const requestId = context?.awsRequestId ?? 'local';
 
       return { error: { code: 'VALIDATION_ERROR', message: error.message, requestId } };
     }
 
+    const retryable = isTransientError(error);
+
     log.error(
       {
         error: formatErrorMessage(error),
+        retryable,
         metricId: validated?.metricId,
         workspaceId: validated?.workspaceId,
         fromDate: validated?.fromDate,
@@ -43,6 +47,14 @@ export const main = async (
       },
       'query failed',
     );
-    throw error;
+
+    return {
+      error: {
+        code: retryable ? 'TRANSIENT_ERROR' : 'INTERNAL_ERROR',
+        message: 'query failed',
+        requestId,
+        retryable,
+      },
+    };
   }
 };
