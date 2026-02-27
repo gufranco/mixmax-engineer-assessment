@@ -101,6 +101,7 @@ jobs:
         with:
           use-installer: true
       - run: pnpm install --frozen-lockfile
+      - run: npm install -g esbuild
       - run: sam build
       - uses: actions/upload-artifact@v4
         with:
