@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   lint-and-typecheck:
@@ -109,58 +108,42 @@ jobs:
           path: .aws-sam/build
           retention-days: 14
 
-  deploy-staging:
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+  deploy:
     runs-on: ubuntu-latest
     needs: [build]
-    environment: staging
+    services:
+      localstack:
+        image: localstack/localstack:4.13.1
+        ports:
+          - 4566:4566
+        env:
+          DEBUG: '0'
+          SERVICES: cloudformation,s3,iam,lambda,dynamodb,sqs,sns,cloudwatch,logs
+        options: >-
+          --health-cmd "curl -f http://localhost:4566/_localstack/health"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: aws-actions/setup-sam@v2
         with:
           use-installer: true
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
       - uses: actions/download-artifact@v4
         with:
           name: sam-build-${{ github.sha }}
           path: .aws-sam/build
-      - name: Deploy to staging
+      - name: Deploy to LocalStack
+        env:
+          AWS_ENDPOINT_URL: http://localhost:4566
+          AWS_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
         run: |
           sam deploy \
-            --stack-name feature-usage-staging \
+            --stack-name feature-usage-ci \
+            --resolve-s3 \
             --no-confirm-changeset \
             --no-fail-on-empty-changeset \
-            --resolve-s3 \
-            --parameter-overrides "Env=staging" \
-            --capabilities CAPABILITY_IAM
-
-  deploy-production:
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    needs: [deploy-staging]
-    environment: production
-    steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/setup-sam@v2
-        with:
-          use-installer: true
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-      - uses: actions/download-artifact@v4
-        with:
-          name: sam-build-${{ github.sha }}
-          path: .aws-sam/build
-      - name: Deploy to production
-        run: |
-          sam deploy \
-            --stack-name feature-usage-production \
-            --no-confirm-changeset \
-            --no-fail-on-empty-changeset \
-            --resolve-s3 \
-            --parameter-overrides "Env=production" \
+            --parameter-overrides "Env=local" \
             --capabilities CAPABILITY_IAM

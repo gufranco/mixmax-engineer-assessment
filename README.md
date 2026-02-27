@@ -535,11 +535,11 @@ GitHub Actions runs on every push and PR to `main`:
 
 ```
 lint-and-typecheck ──┐
-unit-tests ──────────┼── build ── deploy-staging ── deploy-production
+unit-tests ──────────┼── build ── deploy
 integration-tests ───┘
 ```
 
-**Validation** (every push and PR):
+**Validation** (parallel, every push and PR):
 
 - **lint-and-typecheck**: ESLint + `pnpm typecheck` (strict `tsc --noEmit`)
 - **unit-tests**: Pure function tests with coverage, no external deps
@@ -547,14 +547,11 @@ integration-tests ───┘
 
 **Build** (after all validation passes):
 
-- **build**: Runs `sam build`, uploads the build artifact tagged with the git SHA. The same artifact is promoted through staging and production, never rebuilt.
+- **build**: Runs `sam build`, uploads the build artifact tagged with the git SHA. The artifact is built once and reused by the deploy job, never rebuilt.
 
-**Deployment** (main branch pushes only):
+**Deploy** (after build passes):
 
-- **deploy-staging**: Downloads the build artifact and deploys to the staging stack via `sam deploy`. Uses GitHub environment protection rules and OIDC-based AWS credentials (no static keys).
-- **deploy-production**: Requires manual approval via GitHub environment protection rules. Deploys the same artifact that passed staging. Canary deployment shifts 10% of traffic for 5 minutes, rolling back automatically if alarms fire.
-
-Deployment jobs use `aws-actions/configure-aws-credentials` with OIDC (`id-token: write` permission). Each environment needs `AWS_DEPLOY_ROLE_ARN` and `AWS_REGION` configured as GitHub environment variables.
+- **deploy**: Starts a LocalStack service container with the full set of AWS services (CloudFormation, S3, IAM, Lambda, DynamoDB, SQS, SNS, CloudWatch, Logs), downloads the build artifact, and runs `sam deploy` against LocalStack. This validates the entire CloudFormation template end-to-end: resource creation, IAM policies, event source mappings, alarms, and the deployment preference configuration.
 
 Locally, Husky pre-commit hooks run lint-staged (ESLint + Prettier on staged files) and `pnpm typecheck`. Pre-push hooks run the full suite: lint, format check, typecheck, and all tests.
 
