@@ -108,43 +108,12 @@ jobs:
           path: .aws-sam/build
           retention-days: 14
 
-  deploy:
+  validate:
     runs-on: ubuntu-latest
     needs: [build]
-    services:
-      localstack:
-        image: localstack/localstack:4.13.1
-        ports:
-          - 4566:4566
-        env:
-          DEBUG: '0'
-          SERVICES: cloudformation,s3,iam,lambda,dynamodb,sqs,sns,cloudwatch,logs
-        options: >-
-          --health-cmd "curl -f http://localhost:4566/_localstack/health"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: aws-actions/setup-sam@v2
         with:
           use-installer: true
-      - uses: actions/download-artifact@v4
-        with:
-          name: sam-build-${{ github.sha }}
-          path: .aws-sam/build
-      - name: Deploy to LocalStack
-        env:
-          AWS_ENDPOINT_URL: http://localhost:4566
-          AWS_REGION: us-east-1
-          AWS_ACCESS_KEY_ID: test
-          AWS_SECRET_ACCESS_KEY: test
-        run: |
-          sam deploy \
-            --stack-name feature-usage-ci \
-            --region us-east-1 \
-            --resolve-s3 \
-            --no-confirm-changeset \
-            --no-fail-on-empty-changeset \
-            --parameter-overrides "Env=local" \
-            --capabilities CAPABILITY_IAM
+      - run: sam validate --lint

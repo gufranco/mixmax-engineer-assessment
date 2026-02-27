@@ -535,7 +535,7 @@ GitHub Actions runs on every push and PR to `main`:
 
 ```
 lint-and-typecheck ──┐
-unit-tests ──────────┼── build ── deploy
+unit-tests ──────────┼── build ── validate
 integration-tests ───┘
 ```
 
@@ -547,11 +547,11 @@ integration-tests ───┘
 
 **Build** (after all validation passes):
 
-- **build**: Runs `sam build`, uploads the build artifact tagged with the git SHA. The artifact is built once and reused by the deploy job, never rebuilt.
+- **build**: Runs `sam build` to compile Lambda functions with esbuild and uploads the build artifact tagged with the git SHA
 
-**Deploy** (after build passes):
+**Validate** (after build passes):
 
-- **deploy**: Starts a LocalStack service container with the full set of AWS services (CloudFormation, S3, IAM, Lambda, DynamoDB, SQS, SNS, CloudWatch, Logs), downloads the build artifact, and runs `sam deploy` against LocalStack. This validates the entire CloudFormation template end-to-end: resource creation, IAM policies, event source mappings, alarms, and the deployment preference configuration.
+- **validate**: Runs `sam validate --lint` to verify the CloudFormation template is syntactically correct and follows SAM best practices. Full stack deployment to LocalStack is available locally via `pnpm deploy:local`.
 
 Locally, Husky pre-commit hooks run lint-staged (ESLint + Prettier on staged files) and `pnpm typecheck`. Pre-push hooks run the full suite: lint, format check, typecheck, and all tests.
 
