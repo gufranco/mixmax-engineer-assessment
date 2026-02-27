@@ -1,9 +1,9 @@
 export function getTableName(): string {
-  const env = process.env['ENV'];
+  const name = process.env['TABLE_NAME'];
 
-  if (!env) {
-    throw new Error('ENV environment variable is not set');
+  if (!name) {
+    throw new Error('TABLE_NAME environment variable is not set');
   }
 
-  return `feature-usage-${env}`;
+  return name;
 }

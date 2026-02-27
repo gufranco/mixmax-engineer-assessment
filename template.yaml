@@ -87,6 +87,7 @@ Globals:
     Environment:
       Variables:
         ENV: !Ref Env
+        TABLE_NAME: !Ref UsageTable
         TTL_DAYS: !Ref TtlDays
         MAX_DATE_RANGE_DAYS: !Ref MaxDateRangeDays
         LOG_LEVEL: !Ref LogLevel

@@ -5,35 +5,35 @@ import { getTableName } from '../../src/config/table-name.config';
 import { getTtlDays } from '../../src/config/ttl-days.config';
 
 describe('getTableName', () => {
-  const originalEnv = process.env['ENV'];
+  const originalTableName = process.env['TABLE_NAME'];
 
   afterEach(() => {
-    if (originalEnv !== undefined) {
-      process.env['ENV'] = originalEnv;
+    if (originalTableName !== undefined) {
+      process.env['TABLE_NAME'] = originalTableName;
     } else {
-      delete process.env['ENV'];
+      delete process.env['TABLE_NAME'];
     }
   });
 
-  it('should return table name using ENV variable', () => {
+  it('should return table name from TABLE_NAME variable', () => {
     // Arrange
-    const env = faker.string.alphanumeric(6);
+    const name = `feature-usage-${faker.string.alphanumeric(6)}`;
 
-    process.env['ENV'] = env;
+    process.env['TABLE_NAME'] = name;
 
     // Act
     const result = getTableName();
 
     // Assert
-    expect(result).toBe(`feature-usage-${env}`);
+    expect(result).toBe(name);
   });
 
-  it('should throw when ENV is not set', () => {
+  it('should throw when TABLE_NAME is not set', () => {
     // Arrange
-    delete process.env['ENV'];
+    delete process.env['TABLE_NAME'];
 
     // Act & Assert
-    expect(() => getTableName()).toThrow('ENV environment variable is not set');
+    expect(() => getTableName()).toThrow('TABLE_NAME environment variable is not set');
   });
 });
 
