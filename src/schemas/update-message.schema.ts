@@ -6,6 +6,7 @@ import { IDENTIFIER_PATTERN, MAX_IDENTIFIER_LENGTH } from './identifier.pattern'
 const MAX_COUNT = 1_000_000;
 
 export const metricUpdateMessageSchema = z.object({
+  schemaVersion: z.number().int().positive().default(1),
   workspaceId: z
     .string({ error: 'workspaceId is required and must be a non-empty string' })
     .min(1, 'workspaceId is required and must be a non-empty string')

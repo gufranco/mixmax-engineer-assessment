@@ -240,7 +240,7 @@ describe('validateUpdateMessage', () => {
     const result = validateUpdateMessage(message);
 
     // Assert
-    expect(result).toEqual({ ...message, userId: undefined });
+    expect(result).toEqual({ ...message, schemaVersion: 1, userId: undefined });
   });
 
   it('should return typed object for valid message with userId', () => {
