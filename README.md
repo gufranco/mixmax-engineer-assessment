@@ -107,6 +107,7 @@ An SQS-triggered Lambda that processes usage tracking events. Each message repre
 
 | Field | Required | Format | Notes |
 |---|---|---|---|
+| `schemaVersion` | No | number | Message schema version. Defaults to `1` if omitted. Enables safe schema evolution during rolling deployments |
 | `workspaceId` | Yes | string | Workspace identifier. Always writes a `WSP#` entry. Alphanumeric, hyphens, and underscores only. Max 128 characters |
 | `userId` | No | string | User identifier. If provided, also writes a `USR#` entry. Same format constraints as above |
 | `metricId` | Yes | string | The metric name (e.g. `"emails-sent"`). Same format constraints as above |
@@ -143,17 +144,19 @@ Zod schemas are the single source of truth for both runtime validation and compi
 
 ### Error handling
 
-The updates handler classifies every error as transient or permanent before deciding what to do with it.
+The updates handler classifies every error into one of three tiers before deciding what to do with it.
 
-**Permanent errors** (malformed JSON, validation failures, access denied): the message is acknowledged and dropped. Retrying it would produce the same result, so it skips the retry cycle entirely. The error is logged at warn level with `permanent: true` for monitoring.
+**Permanent errors** (malformed JSON, validation failures, known non-retryable AWS errors like `AccessDeniedException` and `ResourceNotFoundException`): the message is acknowledged and dropped. Retrying it would produce the same result, so it skips the retry cycle entirely. The error is logged with `permanent: true` for monitoring.
 
 **Transient errors** (DynamoDB throttling, timeouts, service unavailable, transaction conflicts): the message is returned in `batchItemFailures` so SQS retries it. After the configured `maxReceiveCount` attempts, it moves to the dead letter queue. The error is logged at warn level with `transient: true`.
 
-This means the DLQ only contains messages that failed due to repeated transient issues, making it a reliable signal that something is wrong with the infrastructure rather than noise from bad input data. A CloudWatch alarm fires when any message arrives in the DLQ, and `scripts/replay-dlq.sh` replays messages back to the main queue after the root cause is fixed.
+**Unclassified errors**: any error that is neither a known permanent type nor a known transient type defaults to transient. This is the safer default for data integrity: if the error turns out to be permanent, it exhausts retries and lands in the DLQ for investigation. If it's genuinely transient, the retry succeeds and no data is lost.
+
+This means the DLQ contains messages that failed due to repeated transient or unclassified issues, making it a reliable signal that something needs attention. Permanent errors from bad input never reach the DLQ. A CloudWatch alarm fires when any message arrives in the DLQ, and `scripts/replay-dlq.sh` replays messages back to the main queue after the root cause is fixed.
 
 ### Observability
 
-Pino produces structured JSON logs with a `requestId` field (the Lambda `awsRequestId`) on every log line, making CloudWatch Logs Insights queries straightforward. Error logs preserve the full stack trace via `error.stack`, so root cause analysis doesn't require reproducing the failure. AWS X-Ray is active on both handlers, so the full request path, from Lambda cold start through DynamoDB query latency, is visible in trace waterfalls without manual instrumentation. CloudWatch error alarms on both handlers are wired to an SNS topic for notifications. Log level is configurable per environment via a SAM parameter.
+Pino produces structured JSON logs with a `service` field and a `requestId` field (the Lambda `awsRequestId`) on every log line, making CloudWatch Logs Insights queries straightforward even across multiple functions. Error logs preserve the full stack trace via `error.stack`, so root cause analysis doesn't require reproducing the failure. AWS X-Ray is active on both handlers, so the full request path, from Lambda cold start through DynamoDB query latency, is visible in trace waterfalls without manual instrumentation. CloudWatch error alarms on both handlers are wired to an SNS topic for notifications. Log level is configurable per environment via a SAM parameter.
 
 ### Testing
 
