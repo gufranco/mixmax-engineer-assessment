@@ -8,7 +8,7 @@ import type {
 import { validateUpdateMessage } from './validators/update-message.validator';
 import { ValidationError } from './errors/validation.error';
 import { metricRepository } from './infrastructure/metric.repository';
-import { isTransientError } from './infrastructure/error-classifier.util';
+import { isPermanentError, isTransientError } from './infrastructure/error-classifier.util';
 import { formatErrorMessage } from './errors/format-error-message.util';
 import { logger } from './logging/logger';
 
@@ -60,10 +60,20 @@ export const main = async (
           return;
         }
 
-        log.error(
-          { messageId: record.messageId, error: formatErrorMessage(error), permanent: true },
-          'record failed: permanent error',
+        if (isPermanentError(error)) {
+          log.error(
+            { messageId: record.messageId, error: formatErrorMessage(error), permanent: true },
+            'record failed: permanent error',
+          );
+
+          return;
+        }
+
+        log.warn(
+          { messageId: record.messageId, error: formatErrorMessage(error), transient: true },
+          'record failed: unclassified error, treating as transient',
         );
+        batchItemFailures.push({ itemIdentifier: record.messageId });
       }
     }),
   );

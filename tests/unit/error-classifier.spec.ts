@@ -1,4 +1,4 @@
-import { isTransientError } from '../../src/infrastructure/error-classifier.util';
+import { isPermanentError, isTransientError } from '../../src/infrastructure/error-classifier.util';
 
 function errorWithName(name: string): Error {
   const err = new Error('test');
@@ -71,5 +71,42 @@ describe('isTransientError', () => {
     expect(isTransientError('some string')).toBe(false);
     expect(isTransientError(42)).toBe(false);
     expect(isTransientError(null)).toBe(false);
+  });
+});
+
+describe('isPermanentError', () => {
+  it.each([
+    'AccessDeniedException',
+    'ResourceNotFoundException',
+    'ValidationException',
+    'SerializationException',
+  ])('should classify %s as permanent', (name) => {
+    // Arrange
+    const error = errorWithName(name);
+
+    // Act & Assert
+    expect(isPermanentError(error)).toBe(true);
+  });
+
+  it('should not classify transient errors as permanent', () => {
+    // Arrange
+    const error = errorWithName('ThrottlingException');
+
+    // Act & Assert
+    expect(isPermanentError(error)).toBe(false);
+  });
+
+  it('should not classify a plain Error as permanent', () => {
+    // Arrange
+    const error = new Error('generic error');
+
+    // Act & Assert
+    expect(isPermanentError(error)).toBe(false);
+  });
+
+  it('should not classify a non-Error value as permanent', () => {
+    // Act & Assert
+    expect(isPermanentError('some string')).toBe(false);
+    expect(isPermanentError(null)).toBe(false);
   });
 });

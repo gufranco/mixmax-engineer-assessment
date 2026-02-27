@@ -9,6 +9,13 @@ const TRANSIENT_ERROR_NAMES = new Set([
   'NetworkingError',
 ]);
 
+const PERMANENT_ERROR_NAMES = new Set([
+  'AccessDeniedException',
+  'ResourceNotFoundException',
+  'ValidationException',
+  'SerializationException',
+]);
+
 interface ErrorWithMetadata extends Error {
   $metadata?: { httpStatusCode?: number };
 }
@@ -29,4 +36,12 @@ export function isTransientError(error: unknown): boolean {
   }
 
   return false;
+}
+
+export function isPermanentError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return PERMANENT_ERROR_NAMES.has(error.name);
 }
